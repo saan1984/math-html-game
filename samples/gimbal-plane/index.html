@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gimbal Plane</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .controls select { font: inherit; background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Gimbal Plane</h1>
+    <p class="sub">Fly through 20 gates before the clock runs out. The plane is steered with three Euler angles, and you can fly it into gimbal lock.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Pitch</b> W / S or ↑ / ↓ (W = nose up) · <b>Yaw</b> A / D or ← / → ·
+      <b>Roll</b> Q / E · <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P<br>
+      World: right-handed, y up, the plane's nose along −z.
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- 3D vectors and 3×3 matrices (right-handed, y up) ----------
+  const v3 = (x = 0, y = 0, z = 0) => ({ x, y, z });
+  const add3 = (a, b) => v3(a.x + b.x, a.y + b.y, a.z + b.z);
+  const sub3 = (a, b) => v3(a.x - b.x, a.y - b.y, a.z - b.z);
+  const mul3 = (a, s) => v3(a.x * s, a.y * s, a.z * s);
+  const dot3 = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+  const cross3 = (a, b) => v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+  const len3 = a => Math.hypot(a.x, a.y, a.z);
+  const norm3 = a => { const l = len3(a); return l > 0 ? mul3(a, 1 / l) : v3(); };
+  const lerp3 = (a, b, t) => add3(a, mul3(sub3(b, a), t));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const RAD = Math.PI / 180, deg = r => r / RAD;
+  const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const vs3 = (v, f = f2) => `(${f(v.x)}, ${f(v.y)}, ${f(v.z)})`;
+
+  // Basic rotations about the x, y and z axes (positive = counterclockwise looking down the axis)
+  const Rx = t => { const c = Math.cos(t), s = Math.sin(t); return [[1, 0, 0], [0, c, -s], [0, s, c]]; };
+  const Ry = t => { const c = Math.cos(t), s = Math.sin(t); return [[c, 0, s], [0, 1, 0], [-s, 0, c]]; };
+  const Rz = t => { const c = Math.cos(t), s = Math.sin(t); return [[c, -s, 0], [s, c, 0], [0, 0, 1]]; };
+  const mmul = (A, B) => A.map((row, i) => [0, 1, 2].map(j => row[0] * B[0][j] + row[1] * B[1][j] + row[2] * B[2][j]));
+  const mvec = (M, v) => v3(M[0][0] * v.x + M[0][1] * v.y + M[0][2] * v.z, M[1][0] * v.x + M[1][1] * v.y + M[1][2] * v.z, M[2][0] * v.x + M[2][1] * v.y + M[2][2] * v.z);
+  const I3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const EX = v3(1, 0, 0), EY = v3(0, 1, 0), EZ = v3(0, 0, 1), UP = EY;
+  const FWD = v3(0, 0, -1);
+
+  const settings = {
+    order: 'YXZ',      // yaw (Y), then pitch (X), then roll (Z), outermost first
+    clampPitch: true,  // keep pitch inside ±80° (off = fly into gimbal lock)
+  };
+  const SPEED = 24;                 // units per second
+  const YAW_RATE = 70 * RAD, PITCH_RATE = 60 * RAD, ROLL_RATE = 120 * RAD;
+  const PITCH_LIMIT = 80 * RAD;
+  const GATES = 20, RING_R = 8, SLOT_TOL = 25;
+  const START_TIME = 30, GATE_BONUS = 5;
+
+  // The axis each Euler angle turns about, and its matrix
+  const AXIS = { X: EX, Y: EY, Z: EZ };
+  const ROT = { X: Rx, Y: Ry, Z: Rz };
+  const angleOf = (p, letter) => letter === 'Y' ? p.yaw : letter === 'X' ? p.pitch : p.roll;
+  const NAME = { Y: 'yaw', X: 'pitch', Z: 'roll' };
+  // R = R_first · R_second · R_third : the third is applied to the plane first
+  function orientation(p, order = settings.order) {
+    let M = I3;
+    for (const L of order) M = mmul(M, ROT[L](angleOf(p, L)));
+    return M;
+  }
+  // World-space axis of each gimbal ring: a1 = e1, a2 = M1·e2, a3 = M1·M2·e3
+  function gimbalAxes(p, order = settings.order) {
+    const out = []; let M = I3;
+    for (const L of order) { out.push({ L, axis: mvec(M, AXIS[L]), M }); M = mmul(M, ROT[L](angleOf(p, L))); }
+    return out;
+  }
+
+  // ---------- Canvas (a fixed 1000 × 700 view, scaled to fit) ----------
+  const VIEW = { w: 1000, h: 700 };
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VIEW.w, H / VIEW.h);
+    OX = (W - VIEW.w * S) / 2; OY = (H - VIEW.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { started = true; if (state.over) reset(); });
+
+  // ---------- Course (the same 20 gates every time) ----------
+  function buildCourse() {
+    let seed = 7;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const gates = [];
+    let pos = v3(0, 40, 0), yaw = 0;
+    const climbs = [0, 15, -15, 30, -25, 0, 45, 65, -30, 20];
+    for (let i = 0; i < GATES; i++) {
+      yaw += (rnd() < 0.5 ? -1 : 1) * (25 + 30 * rnd()) * RAD;
+      let pitch = climbs[Math.floor(rnd() * climbs.length)] * RAD;
+      if (i === 0) { yaw = 0; pitch = 0; }
+      if (pos.y < 30 && pitch < 0) pitch = -pitch;
+      if (pos.y > 130 && pitch > 0) pitch = -pitch;
+      const dir = v3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+      pos = add3(pos, mul3(dir, i === 0 ? 50 : 62));
+      const n = dir;
+      const gr = norm3(cross3(n, UP));            // gate right
+      const gu = cross3(gr, n);                   // gate up
+      const slot = i % 4 === 3;
+      const tilt = slot ? [-60, -30, 30, 60, 90][Math.floor(rnd() * 5)] * RAD : 0;
+      gates.push({ c: pos, n, gr, gu, slot, tilt, done: false });
+    }
+    return gates;
+  }
+
+  // ---------- State ----------
+  let state, plane, gates, popups, cam;
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, left: START_TIME, next: 0, clips: 0, bumps: 0 };
+    plane = { pos: v3(0, 40, 40), yaw: 0, pitch: 0, roll: 0, R: I3 };
+    gates = buildCourse();
+    popups = [];
+    cam = { pos: v3(0, 45, 56), f: FWD, r: EX, u: UP, cross: 1 };
+  }
+  reset();
+
+  function popup(text, color) { popups.push({ text, color, life: 1.6, y: 300 }); }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.y -= 20 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (state.over) return;
+    state.time += dt;
+    state.left -= dt;
+    if (state.left <= 0) { state.left = 0; state.over = 'time'; return; }
+
+    // Euler-angle controls: each key changes one angle
+    const yawIn = (keys.a || keys.arrowleft ? 1 : 0) - (keys.d || keys.arrowright ? 1 : 0);
+    const pitchIn = (keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0);
+    const rollIn = (keys.q ? 1 : 0) - (keys.e ? 1 : 0);
+    plane.yaw = wrapPi(plane.yaw + yawIn * YAW_RATE * dt);
+    plane.pitch += pitchIn * PITCH_RATE * dt;
+    plane.pitch = settings.clampPitch ? clamp(plane.pitch, -PITCH_LIMIT, PITCH_LIMIT) : wrapPi(plane.pitch);
+    plane.roll = wrapPi(plane.roll + rollIn * ROLL_RATE * dt);
+    plane.R = orientation(plane);
+
+    const f = mvec(plane.R, FWD);
+    const prev = plane.pos;
+    plane.pos = add3(plane.pos, mul3(f, SPEED * dt));
+
+    if (plane.pos.y < 2) {
+      plane.pos.y = 2; state.left -= 4; state.bumps++;
+      if (plane.pitch < 20 * RAD) plane.pitch = 20 * RAD;
+      popup('GROUND! −4 s', '#ff6b6b');
+    }
+    if (plane.pos.y > 220) plane.pos.y = 220;
+
+    // Gate test: did we cross the gate's plane (n̂ · (p − c) from − to +) inside the ring?
+    const g = gates[state.next];
+    if (g) {
+      const s0 = dot3(sub3(prev, g.c), g.n), s1 = dot3(sub3(plane.pos, g.c), g.n);
+      if (s0 < 0 && s1 >= 0) {
+        const hit = lerp3(prev, plane.pos, s0 / (s0 - s1));
+        const off = sub3(hit, g.c);
+        if (len3(off) <= RING_R) {
+          g.done = true; state.next++; state.left += GATE_BONUS;
+          if (g.slot && wingError(g) > SLOT_TOL) { state.left -= 3; state.clips++; popup(`clipped the slot −3 s (wings ${f0(wingError(g))}° off)`, '#ffb547'); }
+          else popup(g.slot ? `slot! +${GATE_BONUS} s` : `gate ${state.next} +${GATE_BONUS} s`, '#5fd18b');
+          if (state.next >= GATES) state.over = 'won';
+        }
+      }
+    }
+
+    // Chase camera: behind and above, looking at the plane with WORLD up
+    const want = add3(sub3(plane.pos, mul3(f, 16)), v3(0, 5, 0));
+    cam.pos = lerp3(cam.pos, want, 1 - Math.exp(-4 * dt));
+    const target = add3(plane.pos, mul3(f, 8));
+    cam.f = norm3(sub3(target, cam.pos));
+    const rc = cross3(cam.f, UP);                 // right = f̂ × up — fails when f̂ ∥ up
+    cam.cross = len3(rc);
+    if (cam.cross > 1e-3) cam.r = mul3(rc, 1 / cam.cross);
+    else cam.r = norm3(sub3(cam.r, mul3(cam.f, dot3(cam.r, cam.f))));
+    cam.u = cross3(cam.r, cam.f);
+  }
+
+  // Angle between the wings and a slot's long axis (0°–90°)
+  function wingError(g) {
+    const w = mvec(plane.R, EX);
+    const wp = sub3(w, mul3(g.n, dot3(w, g.n)));
+    const axis = add3(mul3(g.gr, Math.cos(g.tilt)), mul3(g.gu, Math.sin(g.tilt)));
+    const c = Math.abs(dot3(norm3(wp), axis));
+    return deg(Math.acos(clamp(c, 0, 1)));
+  }
+
+  // ---------- Projection (by hand, Chapter 17) ----------
+  const FOCAL = (VIEW.h / 2) / Math.tan(35 * RAD);   // 70° vertical field of view
+  const NEAR = 0.5;
+  function toCam(p) { const d = sub3(p, cam.pos); return v3(dot3(d, cam.r), dot3(d, cam.u), dot3(d, cam.f)); }
+  function scr(c) { return { x: VIEW.w / 2 + FOCAL * c.x / c.z, y: VIEW.h / 2 - FOCAL * c.y / c.z }; }
+  function line3(a, b, color, lw = 1.5) {
+    let A = toCam(a), B = toCam(b);
+    if (A.z < NEAR && B.z < NEAR) return;
+    if (A.z < NEAR) A = lerp3(A, B, (NEAR - A.z) / (B.z - A.z));
+    if (B.z < NEAR) B = lerp3(B, A, (NEAR - B.z) / (A.z - B.z));
+    const p = scr(A), q = scr(B);
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+  }
+  function poly3(pts, color, lw, closed = true) {
+    for (let i = 0; i < pts.length - (closed ? 0 : 1); i++) line3(pts[i], pts[(i + 1) % pts.length], color, lw);
+  }
+  function arrow3(from, vec, color, label) {
+    const to = add3(from, vec);
+    line3(from, to, color, 3);
+    const c = toCam(to);
+    if (c.z > NEAR) { const s = scr(c); circleS(s, 4, color); if (label) text(label, s.x + 6, s.y - 6, color, 13); }
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circleS(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+
+  // Plane model in its own space: nose along −z, right wing along +x, up along +y
+  const MODEL = [
+    [v3(0, 0, -3.2), v3(0, 0, 3)], [v3(-4.2, 0, 0.6), v3(4.2, 0, 0.6)],
+    [v3(-4.2, 0, 0.6), v3(0, 0, -0.8)], [v3(4.2, 0, 0.6), v3(0, 0, -0.8)],
+    [v3(-1.6, 0, 3), v3(1.6, 0, 3)], [v3(0, 0, 2.2), v3(0, 1.7, 3.1)], [v3(0, 1.7, 3.1), v3(0, 0, 3)],
+  ];
+
+  function gatePoints(g, r, n = 28) {
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const t = i / n * Math.PI * 2;
+      pts.push(add3(g.c, add3(mul3(g.gr, r * Math.cos(t)), mul3(g.gu, r * Math.sin(t)))));
+    }
+    return pts;
+  }
+  function slotPoints(g) {
+    const a = add3(mul3(g.gr, Math.cos(g.tilt)), mul3(g.gu, Math.sin(g.tilt)));
+    const b = add3(mul3(g.gr, -Math.sin(g.tilt)), mul3(g.gu, Math.cos(g.tilt)));
+    return [[1, 1], [-1, 1], [-1, -1], [1, -1]].map(([i, j]) => add3(g.c, add3(mul3(a, 9 * i), mul3(b, 2.6 * j))));
+  }
+
+  // ---------- Gimbal widget: three rings, one per Euler angle ----------
+  const GCOL = { Y: '#6cb8ff', X: '#5fd18b', Z: '#ffb547' };
+  function drawGimbal(cx, cy, R, labels) {
+    const V = mmul(Rx(22 * RAD), Ry(-35 * RAD));        // fixed viewing angle for the widget
+    const P = v => { const q = mvec(V, v); return { x: cx + R * q.x, y: cy - R * q.y, z: q.z }; };
+    ctx.fillStyle = 'rgba(17,21,28,.82)'; ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.rect(cx - R * 1.35, cy - R * 1.35, R * 2.7, R * 2.75); ctx.fill(); ctx.stroke();
+    const ax = gimbalAxes(plane);
+    const radii = [1, 0.8, 0.6];
+    ax.forEach((g, k) => {
+      // ring: a circle perpendicular to this ring's axis
+      const e = AXIS[g.L];
+      const u = g.L === 'X' ? EY : EX, w = g.L === 'Z' ? EY : (g.L === 'X' ? EZ : EZ);
+      const pts = [];
+      for (let i = 0; i <= 40; i++) {
+        const t = i / 40 * Math.PI * 2;
+        pts.push(P(mul3(mvec(g.M, add3(mul3(u, Math.cos(t)), mul3(w, Math.sin(t)))), radii[k])));
+      }
+      ctx.strokeStyle = GCOL[g.L]; ctx.lineWidth = 2.5;
+      ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke();
+      const a0 = P(mul3(g.axis, -radii[k] - 0.18)), a1 = P(mul3(g.axis, radii[k] + 0.18));
+      ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(a0.x, a0.y); ctx.lineTo(a1.x, a1.y); ctx.stroke(); ctx.setLineDash([]);
+      if (labels) text(`${NAME[g.L]} ${f0(deg(angleOf(plane, g.L)))}°`, a1.x + 4, a1.y, GCOL[g.L], 11);
+      void e;
+    });
+    // tiny plane in the middle
+    for (const [a, b] of MODEL) {
+      const p = P(mul3(mvec(plane.R, a), 0.09)), q = P(mul3(mvec(plane.R, b), 0.09));
+      ctx.strokeStyle = '#e6e9ef'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+    }
+    const lock = Math.abs(dot3(ax[0].axis, ax[2].axis));
+    text(lock > 0.985 ? 'GIMBAL LOCK' : `${settings.order} gimbal`, cx, cy + R * 1.3, lock > 0.985 ? '#ff6b6b' : '#9aa3b2', 11, 'center');
+  }
+
+  // ---------- Render ----------
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, VIEW.w, VIEW.h); ctx.clip();
+    ctx.fillStyle = '#121826'; ctx.fillRect(0, 0, VIEW.w, VIEW.h);
+
+    // Ground grid around the plane
+    const gx = Math.round(plane.pos.x / 30) * 30, gz = Math.round(plane.pos.z / 30) * 30, span = 330;
+    for (let i = -span; i <= span; i += 30) {
+      line3(v3(gx + i, 0, gz - span), v3(gx + i, 0, gz + span), '#1f2a3a', 1);
+      line3(v3(gx - span, 0, gz + i), v3(gx + span, 0, gz + i), '#1f2a3a', 1);
+    }
+    // Plane's shadow on the ground
+    line3(v3(plane.pos.x - 3, 0, plane.pos.z), v3(plane.pos.x + 3, 0, plane.pos.z), '#2b3242', 2);
+
+    // Gates
+    gates.forEach((g, i) => {
+      if (g.done || i > state.next + 3) return;
+      const col = i === state.next ? '#5fd18b' : 'rgba(95,209,139,.35)';
+      if (g.slot) poly3(slotPoints(g), i === state.next ? '#ffb547' : 'rgba(255,181,71,.35)', i === state.next ? 3 : 1.5);
+      else poly3(gatePoints(g, RING_R), col, i === state.next ? 3 : 1.5);
+      if (i === state.next) line3(g.c, add3(g.c, mul3(g.n, 6)), 'rgba(95,209,139,.6)', 1);
+    });
+
+    // Plane
+    for (const [a, b] of MODEL) line3(add3(plane.pos, mvec(plane.R, a)), add3(plane.pos, mvec(plane.R, b)), '#e6e9ef', 2.2);
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    // Pointer to the next gate when it is off-screen
+    const ng = gates[state.next];
+    if (ng && !state.over) {
+      const c = toCam(ng.c);
+      const s = c.z > NEAR ? scr(c) : null;
+      if (!s || s.x < 0 || s.x > VIEW.w || s.y < 0 || s.y > VIEW.h) {
+        const a = Math.atan2(-c.y, c.x);
+        const p = { x: VIEW.w / 2 + Math.cos(a) * 300, y: VIEW.h / 2 + Math.sin(a) * 260 };
+        ctx.fillStyle = '#5fd18b'; ctx.beginPath();
+        ctx.moveTo(p.x + Math.cos(a) * 16, p.y + Math.sin(a) * 16);
+        ctx.lineTo(p.x + Math.cos(a + 2.5) * 12, p.y + Math.sin(a + 2.5) * 12);
+        ctx.lineTo(p.x + Math.cos(a - 2.5) * 12, p.y + Math.sin(a - 2.5) * 12);
+        ctx.closePath(); ctx.fill();
+        text('next gate', p.x, p.y + 26, '#5fd18b', 11, 'center');
+      }
+    }
+
+    const lensGimbal = LENSES[2].on;
+    drawGimbal(lensGimbal ? 830 : 905, lensGimbal ? 170 : 105, lensGimbal ? 120 : 62, lensGimbal);
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, VIEW.w / 2, p.y, p.color, 15, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    text(`time ${f1(state.left)} s   gates ${state.next}/${GATES}   altitude ${f0(plane.pos.y)}`, 20, 28, state.left < 8 ? '#ff6b6b' : '#e6e9ef', 14);
+    text(`yaw ${f0(deg(plane.yaw))}°  pitch ${f0(deg(plane.pitch))}°  roll ${f0(deg(plane.roll))}°   order ${settings.order}${settings.clampPitch ? '' : '   pitch NOT clamped'}`, 20, 50, '#9aa3b2', 13);
+    ctx.restore();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('GIMBAL PLANE', ['Fly through all 20 gates before time runs out (+5 s per gate)', 'W/S pitch · A/D yaw · Q/E roll — orange slots need matching wings', 'Press any key to start']);
+    else if (state.over === 'time') overlay('OUT OF TIME', [`${state.next} of ${GATES} gates`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('COURSE COMPLETE', [`${f1(state.time)} s · ${f1(state.left)} s to spare · ${state.clips} clipped slots`, 'Press R or click to fly again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const row = r => `[${r.map(x => (x >= 0 ? ' ' : '') + f2(x)).join(' ')}]`;
+  function axisAngle(M) {
+    const tr = M[0][0] + M[1][1] + M[2][2];
+    const ang = Math.acos(clamp((tr - 1) / 2, -1, 1));
+    const a = v3(M[2][1] - M[1][2], M[0][2] - M[2][0], M[1][0] - M[0][1]);
+    const s = len3(a);
+    if (s < 1e-4) {
+      if (ang < 0.01) return { ang: 0, axis: null };
+      // 180°: the axis is a column of (M + I), normalized
+      const cols = [0, 1, 2].map(j => v3(M[0][j] + (j === 0), M[1][j] + (j === 1), M[2][j] + (j === 2)));
+      cols.sort((p, q) => len3(q) - len3(p));
+      return { ang, axis: norm3(cols[0]) };
+    }
+    return { ang, axis: mul3(a, 1 / s) };
+  }
+  const LENSES = [
+    {
+      name: 'Axis rotations', chap: 'Chapter 19.1–19.2',
+      formula: 'Rx(θ): y,z turn, x stays\nRy(θ): z,x turn, y stays\nRz(θ): x,y turn, z stays\ncolumns of R = where x̂, ŷ, ẑ go',
+      used: ['Turning any 3D model', 'Spinning pickups and propellers (one axis)',
+        'Wheels (x), turrets (y), banking (z)', 'Building orientations from simple turns'],
+      tryThis: 'Hold A: only yaw changes, and the red and blue arrows swing around the green world-up axis. Hold Q: the plane spins about its blue nose axis.',
+      draw() {
+        const p = plane.pos, R = plane.R;
+        arrow3(p, mul3(mvec(R, EX), 7), '#ff6b6b', 'x (right)');
+        arrow3(p, mul3(mvec(R, EY), 7), '#5fd18b', 'y (up)');
+        arrow3(p, mul3(mvec(R, FWD), 9), '#6cb8ff', '−z (nose)');
+      },
+      live() {
+        const R = plane.R;
+        return `R = ${settings.order === 'YXZ' ? 'Ry(yaw)·Rx(pitch)·Rz(roll)' : 'Rx(pitch)·Ry(yaw)·Rz(roll)'}\n\n${row(R[0])}\n${row(R[1])}\n${row(R[2])}\n\nright = col 1 = ${vs3(mvec(R, EX))}\nup    = col 2 = ${vs3(mvec(R, EY))}\nnose  = −col 3 = ${vs3(mvec(R, FWD))}`;
+      },
+    },
+    {
+      name: 'Euler angles & order', chap: 'Chapter 19.3–19.4',
+      formula: 'YXZ: R = Ry(ψ)·Rx(θ)·Rz(φ)\nnose f = (−sin ψ cos θ, sin θ, −cos ψ cos θ)\nXYZ: R = Rx(θ)·Ry(ψ)·Rz(φ)\nnose f = (−sin ψ, sin θ cos ψ, −cos θ cos ψ)',
+      used: ['Editor rotation fields (x°, y°, z°)', 'First-person and flight controls',
+        'Animation curves for each angle', 'Saving orientations in level files'],
+      tryThis: 'Switch the order to XYZ, yaw 90° left, then pull up with W. The nose no longer climbs: the plane rolls around it instead. Same three angles, different rotation.',
+      controls: '<label>Rotation order <select data-set="order"><option value="YXZ">YXZ (yaw, pitch, roll)</option><option value="XYZ">XYZ (pitch, yaw, roll)</option></select></label>',
+      draw() {
+        const p = plane.pos, f = mvec(plane.R, FWD);
+        const h = norm3(v3(f.x, 0, f.z));
+        arrow3(p, mul3(f, 10), '#6cb8ff', 'nose f̂');
+        if (len3(v3(f.x, 0, f.z)) > 0.01) line3(p, add3(p, mul3(h, 10)), 'rgba(230,233,239,.5)', 1.5);
+        line3(add3(p, mul3(f, 10)), add3(p, v3(f.x * 10, 0, f.z * 10)), 'rgba(230,233,239,.3)', 1);
+      },
+      live() {
+        const f = mvec(plane.R, FWD);
+        const other = settings.order === 'YXZ' ? 'XYZ' : 'YXZ';
+        const fo = mvec(orientation(plane, other), FWD);
+        return `yaw ψ   ${f1(deg(plane.yaw))}°\npitch θ ${f1(deg(plane.pitch))}°\nroll φ  ${f1(deg(plane.roll))}°\n\norder ${settings.order}: nose = ${vs3(f)}\norder ${other}: nose = ${vs3(fo)}\nangle between them ${f1(deg(Math.acos(clamp(dot3(f, fo), -1, 1))))}°`;
+      },
+    },
+    {
+      name: 'Gimbal lock', chap: 'Chapter 19.5',
+      formula: 'outer axis · inner axis\nYXZ: ŷ · (Ry Rx ẑ) = −sin θ\nlocked when the MIDDLE angle = ±90°:\nouter and inner rings turn about one axis',
+      used: ['Why flight sims avoid Euler angles', 'Why FPS cameras clamp pitch',
+        'Animation curves that suddenly spin', 'Why orientations are stored as quaternions (Ch. 20)'],
+      tryThis: 'Untick "Clamp pitch" and hold W until the nose points straight up. Now press A, then Q: both spin the plane around its nose. You have lost a direction of steering. The blue and orange rings lie in one plane.',
+      controls: '<label><input type="checkbox" data-set="clampPitch"> Clamp pitch to ±80°</label>',
+      draw() {},
+      live() {
+        const ax = gimbalAxes(plane);
+        const d = dot3(ax[0].axis, ax[2].axis);
+        const ang = deg(Math.acos(clamp(Math.abs(d), 0, 1)));
+        return `order ${settings.order}  (outer → inner)\n${ax.map(g => ` ${NAME[g.L].padEnd(5)} axis ${vs3(g.axis)}`).join('\n')}\n\nouter · inner = ${f2(d)}\nangle between them ${f1(ang)}°\n${Math.abs(d) > 0.985 ? 'GIMBAL LOCK: only 2 independent turns left' : '3 independent turns'}`;
+      },
+    },
+    {
+      name: 'Axis-angle', chap: 'Chapter 19.6',
+      formula: 'any orientation = ONE turn by angle α\nabout one unit axis n̂\ncos α = (trace(R) − 1) / 2',
+      used: ['Spinning objects at a steady rate', 'Torque and angular velocity in physics',
+        'Measuring "how far apart" two orientations are', 'Building quaternions (Chapter 20)'],
+      tryThis: 'Fly any combination of yaw, pitch and roll. The violet line is the single axis that turns the starting plane straight into the current one.',
+      draw() {
+        const { ang, axis } = axisAngle(plane.R);
+        if (!axis) return;
+        line3(sub3(plane.pos, mul3(axis, 12)), add3(plane.pos, mul3(axis, 12)), '#b48cff', 2.5);
+        const c = toCam(add3(plane.pos, mul3(axis, 12)));
+        if (c.z > NEAR) { const s = scr(c); text(`n̂, α = ${f0(deg(ang))}°`, s.x + 6, s.y, '#b48cff', 13); }
+      },
+      live() {
+        const R = plane.R, tr = R[0][0] + R[1][1] + R[2][2];
+        const { ang, axis } = axisAngle(R);
+        return `trace(R) = ${f2(tr)}\ncos α = (${f2(tr)} − 1) / 2 = ${f2((tr - 1) / 2)}\nα = ${f1(deg(ang))}°\naxis n̂ = ${axis ? vs3(axis) : '(any: no turn)'}\n\nyaw ${f0(deg(plane.yaw))}°, pitch ${f0(deg(plane.pitch))}°, roll ${f0(deg(plane.roll))}°\n= one turn of ${f0(deg(ang))}°`;
+      },
+    },
+    {
+      name: 'Camera & flip', chap: 'Chapter 19.7',
+      formula: 'camera right = normalize(f̂ × up)\nup\' = right × f̂\n|f̂ × up| = sin(angle from up) → 0\nwhen looking straight up: right flips',
+      used: ['First-person mouse look (yaw + clamped pitch)', 'Chase and orbit cameras',
+        '"Look at" for cameras and turrets', 'Why cameras flip at the poles'],
+      tryThis: 'Untick "Clamp pitch" and climb past vertical. As the camera looks straight up, |f̂ × up| hits 0 and the picture flips upside down. With the clamp on, pitch stops at 80° and the camera never gets there.',
+      controls: '<label><input type="checkbox" data-set="clampPitch"> Clamp pitch to ±80°</label>',
+      draw() {
+        const c = add3(plane.pos, mul3(cam.f, -4));
+        arrow3(plane.pos, mul3(cam.r, 6), '#ff6b6b', 'cam right');
+        void c;
+      },
+      live() {
+        return `camera f̂ = ${vs3(cam.f)}\nf̂ × up    = ${vs3(cross3(cam.f, UP))}\n|f̂ × up|  = ${f2(cam.cross)}  (angle from up ${f0(deg(Math.asin(clamp(cam.cross, 0, 1))))}°${dot3(cam.f, UP) < 0 ? ', looking down' : ''})\nright     = ${vs3(cam.r)}\n\npitch ${f1(deg(plane.pitch))}°  clamp ${settings.clampPitch ? 'ON (±80°)' : 'OFF'}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Fly a few gates first. Then press 1–5 to see the rotations behind every turn.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : el.value;
+        if (key === 'clampPitch' && settings.clampPitch) plane.pitch = clamp(wrapPi(plane.pitch), -PITCH_LIMIT, PITCH_LIMIT);
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

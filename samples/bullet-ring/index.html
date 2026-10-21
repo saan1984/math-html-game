@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bullet Ring</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Bullet Ring</h1>
+    <p class="sub">Dodge a boss that fires rings, spirals and flowers. Every bullet starts as a point on a circle: c + r(cos θ, sin θ).</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Focus</b> (slow, show hitbox) Shift · <b>Fire</b> automatic ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Small vector helpers ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const dist = (a, b) => len(sub(a, b));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => (Math.abs(n) < 0.0005 ? 0 : n).toFixed(3);
+  const wrap360 = d => ((d % 360) + 360) % 360;
+
+  const settings = {
+    radians: true,   // the pitfall when false: degrees go straight into cos and sin
+    ringN: 24,       // bullets per ring in phase 1
+    shieldW: 180,    // shield angular speed, degrees per second
+  };
+
+  // ---------- Angles (Chapter 8) ----------
+  // Every pattern is designed in degrees. cos and sin expect radians.
+  const DEG = Math.PI / 180;
+  const toRad = deg => settings.radians ? deg * DEG : deg;
+  const dirDeg = (deg, s = 1) => V(Math.cos(toRad(deg)) * s, Math.sin(toRad(deg)) * s);
+  const polar = (c, r, deg) => add(c, dirDeg(deg, r));          // p = c + r(cos θ, sin θ)
+  // Drawing helpers for the lenses always use the correct conversion
+  const trueDir = (deg, s = 1) => V(Math.cos(deg * DEG) * s, Math.sin(deg * DEG) * s);
+  // Where a bullet really goes, in degrees, once the angle has passed through cos and sin
+  const actualDeg = deg => settings.radians ? wrap360(deg) : wrap360(deg / DEG);
+
+  // ---------- Constants ----------
+  const WORLD = { w: 1000, h: 760 };
+  const BOSS_HOME = V(500, 190), BOSS_ORBIT_R = 50, BOSS_OMEGA = 24;   // boss orbits at 24°/s
+  const BOSS_R = 40, BOSS_HP = 3000;
+  const PLAYER_START = V(500, 640);
+  const PLAYER_SPEED = 260, FOCUS_SPEED = 120, PLAYER_HIT_R = 5;
+  const BULLET_R = 6, GRAZE_R = 28;
+  const SHOT_SPEED = 720, SHOT_INTERVAL = 1 / 12;
+  const RING_SPEED = 150, RING_EVERY = 1.2;
+  const SPIRAL_SPEED = 170, SPIRAL_OMEGA = 150, SPIRAL_ARMS = 3, SPIRAL_EVERY = 0.07;
+  const RING2_N = 16, RING2_SPEED = 120, RING2_EVERY = 2.4;
+  const FLOWER_N = 40, FLOWER_PETALS = 5, FLOWER_SPEED = 150, FLOWER_DEPTH = 0.35, FLOWER_EVERY = 1.8, FLOWER_TURN = 12;
+  const SPIRAL2_SPEED = 150, SPIRAL2_OMEGA = -110, SPIRAL2_ARMS = 2, SPIRAL2_EVERY = 0.1;
+  const SHIELD_R = 44, SHIELD_ORBS = 3, ORB_R = 9, ORB_RECHARGE = 4;
+  const PI_LABELS = { 0: '0', 30: 'π/6', 60: 'π/3', 90: 'π/2', 120: '2π/3', 150: '5π/6', 180: 'π',
+    210: '7π/6', 240: '4π/3', 270: '3π/2', 300: '5π/3', 330: '11π/6' };
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { started = true; if (state.over) reset(); });
+
+  // ---------- State ----------
+  let state, boss, player, bullets, shots, orbs, popups, lastRing, lastBullet;
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, grazes: 0, phase: 1, flash: 0 };
+    boss = { pos: polar(BOSS_HOME, BOSS_ORBIT_R, 0), angle: 0, hp: BOSS_HP, hurt: 0,
+      ringT: 1.2, ringCount: 0, spiralT: 0, spiralAngle: 90, ring2T: 2, flowerT: 0.5, flowerOffset: 90,
+      spiral2T: 0, spiral2Angle: 90 };
+    player = { pos: V(PLAYER_START.x, PLAYER_START.y), lives: 3, invuln: 1.5, shotT: 0, focus: false };
+    bullets = []; shots = []; popups = [];
+    orbs = []; for (let i = 0; i < SHIELD_ORBS; i++) orbs.push({ i, cd: 0, pos: V() });
+    state.shieldAngle = 0;
+    lastRing = null; lastBullet = null;
+    placeOrbs();
+  }
+
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.4 }); }
+
+  function fire(deg, speed, kind) {
+    const origin = V(boss.pos.x, boss.pos.y);
+    const b = { pos: V(origin.x, origin.y), vel: dirDeg(deg, speed), origin, deg, speed, kind,
+      born: state.time, grazed: false };
+    bullets.push(b);
+    lastBullet = b;
+    return b;
+  }
+
+  // A ring: n bullets, 360°/n apart, starting at θ₀
+  function ring(n, deg0, speed, kind) {
+    const step = 360 / n;
+    const list = [];
+    for (let i = 0; i < n; i++) list.push(fire(deg0 + i * step, speed, kind));
+    lastRing = { origin: V(boss.pos.x, boss.pos.y), n, deg0, step, speed, born: state.time, list };
+  }
+
+  // A flower: one ring whose speed depends on the angle, so after t seconds r(θ) = t·v(θ)
+  function flower() {
+    const step = 360 / FLOWER_N;
+    const list = [];
+    for (let i = 0; i < FLOWER_N; i++) {
+      const rel = i * step;
+      const speed = FLOWER_SPEED * (1 + FLOWER_DEPTH * Math.cos(toRad(FLOWER_PETALS * rel)));
+      list.push(fire(boss.flowerOffset + rel, speed, 'flower'));
+    }
+    lastRing = { origin: V(boss.pos.x, boss.pos.y), n: FLOWER_N, deg0: boss.flowerOffset, step, speed: FLOWER_SPEED,
+      born: state.time, list, flower: true };
+    boss.flowerOffset += FLOWER_TURN;
+  }
+
+  function placeOrbs() {
+    for (const o of orbs) o.pos = polar(player.pos, SHIELD_R, state.shieldAngle + o.i * 360 / SHIELD_ORBS);
+  }
+
+  function setPhase(p) {
+    if (state.phase === p) return;
+    state.phase = p;
+    bullets = [];
+    state.flash = 0.4;
+    popup(V(boss.pos.x, boss.pos.y + 70), p === 2 ? 'PHASE 2: SPIRALS' : 'PHASE 3: FLOWERS', '#ffb547');
+  }
+
+  function hitPlayer() {
+    player.lives--;
+    player.invuln = 2;
+    state.flash = 0.3;
+    bullets = bullets.filter(b => dist(b.pos, player.pos) > 120);   // a small safety bubble
+    popup(V(player.pos.x, player.pos.y - 24), 'HIT', '#ff6b6b');
+    if (player.lives <= 0) state.over = 'lost';
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 24 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    state.flash = Math.max(0, state.flash - dt);
+    if (state.over) return;
+    state.time += dt;
+
+    // Player
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    const il = Math.hypot(ix, iy);
+    player.focus = !!keys.shift;
+    const sp = player.focus ? FOCUS_SPEED : PLAYER_SPEED;
+    if (il > 0) player.pos = add(player.pos, V(ix / il * sp * dt, iy / il * sp * dt));
+    player.pos.x = clamp(player.pos.x, 16, WORLD.w - 16);
+    player.pos.y = clamp(player.pos.y, 16, WORLD.h - 16);
+    player.invuln -= dt;
+
+    // Auto-fire straight up
+    player.shotT -= dt;
+    if (player.shotT <= 0) {
+      shots.push({ pos: V(player.pos.x - 6, player.pos.y - 12) }, { pos: V(player.pos.x + 6, player.pos.y - 12) });
+      player.shotT = SHOT_INTERVAL;
+    }
+    for (const s of shots) s.pos.y -= SHOT_SPEED * dt;
+
+    // Orbiting shield: θᵢ = θ₀ + ωt + i·120°
+    state.shieldAngle += settings.shieldW * dt;
+    placeOrbs();
+    for (const o of orbs) o.cd -= dt;
+
+    // Boss orbits its home point: angle grows by ω·Δt
+    boss.angle += BOSS_OMEGA * dt;
+    boss.pos = polar(BOSS_HOME, BOSS_ORBIT_R, boss.angle);
+    boss.hurt -= dt;
+
+    // Patterns
+    if (state.phase === 1) {
+      boss.ringT -= dt;
+      if (boss.ringT <= 0) {
+        const n = settings.ringN;
+        const deg0 = (boss.ringCount % 2) * 180 / n;   // every other ring is turned by half a step
+        ring(n, deg0, RING_SPEED, 'ring');
+        boss.ringCount++;
+        boss.ringT = RING_EVERY;
+      }
+    } else if (state.phase === 2) {
+      boss.spiralAngle += SPIRAL_OMEGA * dt;
+      boss.spiralT -= dt;
+      while (boss.spiralT <= 0) {
+        for (let k = 0; k < SPIRAL_ARMS; k++) fire(boss.spiralAngle + k * 360 / SPIRAL_ARMS, SPIRAL_SPEED, 'spiral');
+        boss.spiralT += SPIRAL_EVERY;
+      }
+      boss.ring2T -= dt;
+      if (boss.ring2T <= 0) { ring(RING2_N, boss.spiralAngle + 60, RING2_SPEED, 'ring'); boss.ring2T = RING2_EVERY; }
+    } else {
+      boss.flowerT -= dt;
+      if (boss.flowerT <= 0) { flower(); boss.flowerT = FLOWER_EVERY; }
+      boss.spiral2Angle += SPIRAL2_OMEGA * dt;
+      boss.spiral2T -= dt;
+      while (boss.spiral2T <= 0) {
+        for (let k = 0; k < SPIRAL2_ARMS; k++) fire(boss.spiral2Angle + k * 360 / SPIRAL2_ARMS, SPIRAL2_SPEED, 'spiral');
+        boss.spiral2T += SPIRAL2_EVERY;
+      }
+    }
+
+    // Bullets
+    for (const b of bullets) b.pos = add(b.pos, mul(b.vel, dt));
+    for (const b of bullets) {
+      if (b.dead) continue;
+      for (const o of orbs) {
+        if (o.cd <= 0 && dist(o.pos, b.pos) < ORB_R + BULLET_R) { b.dead = true; o.cd = ORB_RECHARGE; state.score += 2; break; }
+      }
+      if (b.dead) continue;
+      const d = dist(b.pos, player.pos);
+      if (d < BULLET_R + PLAYER_HIT_R && player.invuln <= 0) { hitPlayer(); return; }
+      if (!b.grazed && d < GRAZE_R) { b.grazed = true; state.grazes++; state.score += 5; }
+    }
+    bullets = bullets.filter(b => !b.dead && b.pos.x > -40 && b.pos.y > -40 && b.pos.x < WORLD.w + 40 && b.pos.y < WORLD.h + 40);
+
+    // Shots hit the boss
+    for (const s of shots) {
+      if (dist(s.pos, boss.pos) < BOSS_R + 4) { s.dead = true; boss.hp -= 1; boss.hurt = 0.06; state.score += 10; }
+    }
+    shots = shots.filter(s => !s.dead && s.pos.y > -20);
+
+    if (boss.hp <= 0) {
+      boss.hp = 0; state.over = 'won';
+      state.score += player.lives * 1000;
+      bullets = [];
+    } else if (boss.hp <= BOSS_HP / 3) setPhase(3);
+    else if (boss.hp <= BOSS_HP * 2 / 3) setPhase(2);
+  }
+
+  // ---------- Drawing ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 1.5) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  function arrowHead(at, deg, color) {
+    const a = deg * DEG;
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(at.x, at.y);
+    ctx.lineTo(at.x - Math.cos(a - .4) * 10, at.y - Math.sin(a - .4) * 10);
+    ctx.lineTo(at.x - Math.cos(a + .4) * 10, at.y - Math.sin(a + .4) * 10);
+    ctx.closePath(); ctx.fill();
+  }
+  // An arc from angle a0 to a1 (degrees, true radians), with an arrowhead at the end
+  function arcArrow(c, r, a0, a1, color, lw = 2) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.arc(c.x, c.y, r, a0 * DEG, a1 * DEG, a1 < a0); ctx.stroke();
+    if (Math.abs(a1 - a0) > 8) arrowHead(add(c, trueDir(a1, r)), a1 + (a1 >= a0 ? 90 : -90), color);
+  }
+  function dashed(on) { ctx.setLineDash(on ? [6, 6] : []); }
+  const BULLET_COLORS = { ring: '#ffb547', spiral: '#b48cff', flower: '#ff7aa8' };
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 50) { ctx.moveTo(x, 0); ctx.lineTo(x, WORLD.h); }
+    for (let y = 0; y <= WORLD.h; y += 50) { ctx.moveTo(0, y); ctx.lineTo(WORLD.w, y); }
+    ctx.stroke();
+    ctx.strokeStyle = '#2b3242'; ctx.lineWidth = 2; ctx.strokeRect(1, 1, WORLD.w - 2, WORLD.h - 2);
+    if (state.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${state.flash * 0.25})`; ctx.fillRect(0, 0, WORLD.w, WORLD.h); }
+
+    // Boss
+    const bc = boss.hurt > 0 ? '#ffffff' : '#ff6b6b';
+    circle(boss.pos, BOSS_R, '#3a1d27', bc, 4);
+    circle(boss.pos, BOSS_R * 0.45, '#5a2330', '#ff9b6b', 2);
+    for (let k = 0; k < 8; k++) {
+      const a = boss.angle * 3 + k * 45;
+      line(add(boss.pos, trueDir(a, BOSS_R * 0.55)), add(boss.pos, trueDir(a, BOSS_R * 0.9)), 'rgba(255,155,107,.6)', 2);
+    }
+
+    // Player shots
+    ctx.fillStyle = '#cfe6ff';
+    for (const s of shots) ctx.fillRect(s.pos.x - 1.5, s.pos.y - 8, 3, 12);
+
+    // Bullets
+    for (const b of bullets) {
+      circle(b.pos, BULLET_R, BULLET_COLORS[b.kind], null);
+      circle(b.pos, BULLET_R * 0.45, '#fff3e0', null);
+    }
+
+    // Shield orbs
+    for (const o of orbs) {
+      if (o.cd > 0) circle(o.pos, ORB_R * 0.6, null, 'rgba(108,184,255,.35)', 1.5);
+      else circle(o.pos, ORB_R, 'rgba(108,184,255,.35)', '#6cb8ff', 2);
+    }
+
+    // Player ship
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 12) % 2 === 0;
+    if (!blink) {
+      const p = player.pos;
+      ctx.fillStyle = '#2a5d8f'; ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y - 16); ctx.lineTo(p.x + 12, p.y + 12); ctx.lineTo(p.x, p.y + 6);
+      ctx.lineTo(p.x - 12, p.y + 12); ctx.closePath(); ctx.fill(); ctx.stroke();
+      if (player.focus) circle(p, PLAYER_HIT_R, '#ffffff', '#ff6b6b', 1.5);
+    }
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    const bw = 600, bx = (WORLD.w - bw) / 2;
+    ctx.fillStyle = '#1f2430'; ctx.fillRect(bx, 14, bw, 8);
+    ctx.fillStyle = '#ff6b6b'; ctx.fillRect(bx, 14, bw * boss.hp / BOSS_HP, 8);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(bx + bw / 3 - 1, 14, 2, 8); ctx.fillRect(bx + bw * 2 / 3 - 1, 14, 2, 8);
+    text(`BOSS  phase ${state.phase}/3`, bx, 40, '#9aa3b2', 12);
+    text(`${'♥'.repeat(Math.max(0, player.lives))}${'♡'.repeat(3 - Math.max(0, player.lives))}`, 24, WORLD.h - 22, '#ff6b6b', 20);
+    text(`score ${state.score}   grazes ${state.grazes}   time ${state.time.toFixed(1)}s`, 120, WORLD.h - 24, '#9aa3b2', 13);
+    if (!settings.radians) text('RADIANS OFF: degrees are going straight into cos and sin', WORLD.w / 2, 62, '#ff6b6b', 13, 'center');
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('BULLET RING', ['Drain the boss\'s health bar before you lose 3 lives', 'WASD to move · Shift to focus · you fire automatically', 'Your three shield orbs block one bullet each, then recharge', 'Press any key to start']);
+    else if (state.over === 'lost') overlay('SHOT DOWN', [`score ${state.score} · boss at ${f0(boss.hp / BOSS_HP * 100)}% · ${state.time.toFixed(1)} s`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('BOSS DEFEATED', [`score ${state.score} · ${state.time.toFixed(1)} s · ${player.lives} lives left · ${state.grazes} grazes`, 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  function newestBullet() { return lastBullet && bullets.includes(lastBullet) ? lastBullet : bullets[bullets.length - 1] || null; }
+  function piLabel(d) { return PI_LABELS[d] !== undefined ? PI_LABELS[d] : ''; }
+
+  const LENSES = [
+    {
+      name: 'Degrees & radians', chap: 'Chapter 8.1',
+      formula: 'radians = degrees × π / 180\ndegrees = radians × 180 / π\n360° = 2π rad    1 rad ≈ 57.3°',
+      used: ['Designers think in degrees; cos and sin want radians', 'Rotation values in editors vs in the math',
+        'Turn speeds in °/s converted once', 'Arc length s = r × θ (θ in radians)'],
+      tryThis: 'Untick "Radians". The boss still plans its rings in degrees, but now 15° is read as 15 radians (about 859°): the regular ring turns into a scattered mess, and your shield orbs blur.',
+      controls: `<label><input type="checkbox" data-set="radians"> Radians (convert degrees before cos and sin)</label>`,
+      draw() {
+        const c = boss.pos, R = 120;
+        circle(c, R, null, 'rgba(230,233,239,.35)', 1);
+        for (let d = 0; d < 360; d += 30) {
+          line(add(c, trueDir(d, R - 6)), add(c, trueDir(d, R + 6)), '#e6e9ef', 1.5);
+          const q = add(c, trueDir(d, R + 24));
+          text(`${d}°`, q.x, q.y - 1, '#e6e9ef', 11, 'center');
+          text(piLabel(d), q.x, q.y + 12, '#6cb8ff', 11, 'center');
+        }
+        arcArrow(c, R - 18, 0, 60, '#5fd18b', 2);
+        text('+θ', c.x + 70, c.y + 52, '#5fd18b', 13);
+        const b = newestBullet();
+        if (b) {
+          const a = actualDeg(b.deg);
+          line(c, add(c, trueDir(a, R)), '#ffb547', 2);
+          text(`planned ${f0(wrap360(b.deg))}°`, c.x, c.y - R - 34, '#ffb547', 13, 'center');
+        }
+      },
+      live() {
+        const b = newestBullet();
+        if (!b) return 'wait for the boss to fire';
+        const d = wrap360(b.deg);
+        const r = d * DEG;
+        return `newest bullet\n planned angle   ${f1(d)}°\n × π/180         ${f3(r)} rad\n passed to cos   ${settings.radians ? f3(r) : f1(d)}\n flies toward    ${f1(actualDeg(b.deg))}°${settings.radians ? '' : '   (wrong!)'}\n\n1 rad = ${f2(180 / Math.PI)}°   15° = ${f3(15 * DEG)} rad`;
+      },
+    },
+    {
+      name: 'Unit circle', chap: 'Chapter 8.2–8.4',
+      formula: 'point at angle θ = (cos θ, sin θ)\ncos² θ + sin² θ = 1\ny down: positive θ turns clockwise',
+      used: ['Turning any angle into a direction', 'Aiming bullets, rotating sprites', 'Clock hands and radial gauges',
+        'Every circle and orbit in the game'],
+      tryThis: 'Watch the spiral in phase 2: the red leg (cos θ) and green leg (sin θ) trade lengths as θ turns, but the sum of their squares stays 1.',
+      draw() {
+        const c = boss.pos, R = 100;
+        const b = newestBullet(); if (!b) return;
+        const a = actualDeg(b.deg);
+        dashed(true); line(V(c.x - R - 20, c.y), V(c.x + R + 20, c.y), 'rgba(230,233,239,.4)', 1);
+        line(V(c.x, c.y - R - 20), V(c.x, c.y + R + 20), 'rgba(230,233,239,.4)', 1); dashed(false);
+        circle(c, R, null, '#6cb8ff', 1.5);
+        text('+x', c.x + R + 24, c.y + 4, '#9aa3b2', 12);
+        text('+y (down)', c.x + 6, c.y + R + 34, '#9aa3b2', 12);
+        const p = add(c, trueDir(a, R));
+        line(c, V(p.x, c.y), '#ff6b6b', 3);
+        line(V(p.x, c.y), p, '#5fd18b', 3);
+        line(c, p, '#e6e9ef', 2);
+        circle(p, 5, '#ffffff');
+        arcArrow(c, 28, 0, a > 180 ? a - 360 : a, '#ffb547', 2);
+        const cs = Math.cos(a * DEG), sn = Math.sin(a * DEG);
+        text(`cos θ = ${f2(cs)}`, (c.x + p.x) / 2, c.y + (sn >= 0 ? -8 : 18), '#ff6b6b', 12, 'center');
+        text(`sin θ = ${f2(sn)}`, p.x + (cs >= 0 ? 8 : -8), (c.y + p.y) / 2, '#5fd18b', 12, cs >= 0 ? 'left' : 'right');
+        text(`θ = ${f0(a)}°`, c.x + 34, c.y - 30, '#ffb547', 12);
+        text('radius 1 drawn as 100 px', c.x, c.y - R - 12, '#6cb8ff', 11, 'center');
+      },
+      live() {
+        const b = newestBullet();
+        if (!b) return 'wait for the boss to fire';
+        const a = actualDeg(b.deg), cs = Math.cos(a * DEG), sn = Math.sin(a * DEG);
+        return `θ          ${f1(a)}°  (${f3(a * DEG)} rad)\ncos θ      ${f3(cs)}\nsin θ      ${f3(sn)}\ncos² + sin² = ${f3(cs * cs)} + ${f3(sn * sn)}\n           = ${f3(cs * cs + sn * sn)}\n\nsin θ ${sn > 0.0005 ? '> 0: below the boss (y down)' : sn < -0.0005 ? '< 0: above the boss' : '= 0: level with the boss'}`;
+      },
+    },
+    {
+      name: 'Rings (360° ÷ n)', chap: 'Chapter 8.6',
+      formula: 'Δθ = 360° / n\nθᵢ = θ₀ + i × Δθ\npᵢ = c + r (cos θᵢ, sin θᵢ)\ngap s = r × Δθ (Δθ in radians)',
+      used: ['Radial bullet patterns and novas', 'Spawning enemies in a ring', 'Radial menus and dial ticks',
+        'Circular explosions and shockwaves'],
+      tryThis: 'Drag n (phase 1 rings) down to 12 and up to 36. Near the boss the gaps are too small to fit through; further out they open up, because s = r × Δθ grows with r.',
+      controls: `<label>Bullets per ring n <input type="range" min="8" max="36" step="1" data-set="ringN"> <span data-show="ringN"></span></label>`,
+      draw() {
+        const R = lastRing; if (!R) return;
+        const alive = R.list.filter(b => bullets.includes(b));
+        if (!alive.length) return;
+        const r = (state.time - R.born) * R.speed;
+        const c = R.origin;
+        if (!R.flower) { dashed(true); circle(c, r, null, 'rgba(255,181,71,.45)', 1); dashed(false); }
+        for (const b of alive) line(c, b.pos, 'rgba(255,181,71,.18)', 1);
+        const b0 = R.list[0], b1 = R.list[1];
+        line(c, b0.pos, '#ffb547', 2); line(c, b1.pos, '#ffb547', 2);
+        if (!R.flower && settings.radians) {
+          arcArrow(c, Math.min(r, 90), R.deg0, R.deg0 + R.step, '#5fd18b', 2);
+          const m = add(c, trueDir(R.deg0 + R.step / 2, Math.min(r, 90) + 16));
+          text(`Δθ = ${f1(R.step)}°`, m.x, m.y, '#5fd18b', 12, 'center');
+          const q = add(c, trueDir(R.deg0 + R.step / 2, r + 18));
+          text(`s ≈ ${f0(r * R.step * DEG)}`, q.x, q.y, '#ffb547', 12, 'center');
+        }
+        text('i = 0', b0.pos.x + 10, b0.pos.y - 8, '#ffb547', 11);
+        text('i = 1', b1.pos.x + 10, b1.pos.y + 14, '#ffb547', 11);
+      },
+      live() {
+        const R = lastRing;
+        if (!R) return 'wait for a ring';
+        const r = (state.time - R.born) * R.speed;
+        const s = r * R.step * DEG;
+        return `${R.flower ? 'flower' : 'ring'} of n = ${R.n}\n Δθ = 360° / ${R.n} = ${f2(R.step)}° = ${f3(R.step * DEG)} rad\n θ₀ = ${f1(wrap360(R.deg0))}°\n radius now  r ≈ ${f0(r)} px\n gap s = r × Δθ ≈ ${f0(s)} px\n free space ≈ s − 2×${BULLET_R} = ${f0(s - 2 * BULLET_R)} px\n your hitbox is ${2 * PLAYER_HIT_R} px wide`;
+      },
+    },
+    {
+      name: 'Spirals & polar', chap: 'Chapter 8.5 & 8.7',
+      formula: '(r, θ) → (x, y) = (r cos θ, r sin θ)\n(x, y) → r = √(x² + y²), θ = atan2(y, x)\nspiral: fire at θ = ω·t, fly at speed v\n        → r grows with θ',
+      used: ['Spiral and flower bullet patterns', 'Galaxy arms, whirlpools, vortex effects',
+        'Polar grids for radar screens', 'Storing a point as distance + angle'],
+      tryThis: 'Reach phase 2. Each arm fires along an angle that turns at 150°/s while its bullets fly straight out, so the arm curls into a spiral. Phase 3 bends a ring into a 5-petal flower.',
+      draw() {
+        const b = newestBullet(); if (!b) return;
+        const c = b.origin, o = sub(b.pos, c);
+        line(c, V(b.pos.x, c.y), '#ff6b6b', 2);
+        line(V(b.pos.x, c.y), b.pos, '#5fd18b', 2);
+        line(c, b.pos, '#e6e9ef', 2);
+        circle(b.pos, BULLET_R + 4, null, '#ffffff', 2);
+        text(`(x, y) = (${f0(o.x)}, ${f0(o.y)})`, b.pos.x + 12, b.pos.y - 10, '#e6e9ef', 12);
+        text(`r = ${f0(len(o))}, θ = ${f0(wrap360(Math.atan2(o.y, o.x) / DEG))}°`, b.pos.x + 12, b.pos.y + 8, '#ffb547', 12);
+        // The ideal spiral arm(s): bullets fired a seconds ago sit at θ = θ_now − ω·a, r = v·a
+        if (state.phase !== 1 && settings.radians) {
+          const sw = state.phase === 2
+            ? { ang: boss.spiralAngle, w: SPIRAL_OMEGA, v: SPIRAL_SPEED, arms: SPIRAL_ARMS }
+            : { ang: boss.spiral2Angle, w: SPIRAL2_OMEGA, v: SPIRAL2_SPEED, arms: SPIRAL2_ARMS };
+          ctx.globalAlpha = 0.5;
+          for (let k = 0; k < sw.arms; k++) {
+            ctx.strokeStyle = '#b48cff'; ctx.lineWidth = 1.5; ctx.beginPath();
+            for (let a = 0; a <= 5; a += 0.05) {
+              const q = add(boss.pos, trueDir(sw.ang + k * 360 / sw.arms - sw.w * a, sw.v * a));
+              a ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y);
+            }
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
+        }
+      },
+      live() {
+        const b = newestBullet();
+        if (!b) return 'wait for the boss to fire';
+        const o = sub(b.pos, b.origin), r = len(o), th = Math.atan2(o.y, o.x);
+        let s = `newest bullet, measured from where it was fired\n (x, y)  = (${f0(o.x)}, ${f0(o.y)})\n r = √(x² + y²) = ${f0(r)}\n θ = atan2(y, x) = ${f1(th / DEG)}°\n back: (r cos θ, r sin θ) = (${f0(r * Math.cos(th))}, ${f0(r * Math.sin(th))})`;
+        if (state.phase === 2) s += `\n\nspiral ω = ${SPIRAL_OMEGA}°/s, v = ${SPIRAL_SPEED}, ${SPIRAL_ARMS} arms\n arm gap = v × (360°/${SPIRAL_ARMS}) / ω = ${f0(SPIRAL_SPEED * 360 / SPIRAL_ARMS / SPIRAL_OMEGA)} px`;
+        if (state.phase === 3) s += `\n\nflower v(θ) = ${FLOWER_SPEED}(1 + ${FLOWER_DEPTH} cos ${FLOWER_PETALS}θ)\n petals ${f1(FLOWER_SPEED * (1 + FLOWER_DEPTH))}, valleys ${f1(FLOWER_SPEED * (1 - FLOWER_DEPTH))} px/s\n spiral ω = ${SPIRAL2_OMEGA}°/s (counter-clockwise)`;
+        return s;
+      },
+    },
+    {
+      name: 'Orbits (shield)', chap: 'Chapter 8.8',
+      formula: 'θᵢ(t) = θ₀ + ω·t + i × 120°\norbᵢ = player + 44 (cos θᵢ, sin θᵢ)\norb speed = ω (in rad/s) × r\nperiod T = 360° / ω',
+      used: ['Orbiting shields, drones and familiars', 'Moons, planets and satellites', 'Spinning saw blades and fire bars',
+        'Enemies circling the player before they attack'],
+      tryThis: 'Drag the shield speed to 60°/s and to 360°/s. Faster orbs sweep up more bullets, but every orb still has to recharge for 4 s after a block.',
+      controls: `<label>Shield ω <input type="range" min="60" max="360" step="30" data-set="shieldW"> <span data-show="shieldW"></span>°/s</label>`,
+      draw() {
+        const c = player.pos;
+        dashed(true); circle(c, SHIELD_R, null, 'rgba(108,184,255,.6)', 1); dashed(false);
+        for (const o of orbs) {
+          line(c, o.pos, 'rgba(108,184,255,.8)', 1.5);
+          const a = wrap360(state.shieldAngle + o.i * 120);
+          const q = add(c, trueDir(a, SHIELD_R + 26));
+          if (settings.radians) text(`${f0(a)}°`, q.x, q.y + 4, '#6cb8ff', 11, 'center');
+        }
+        if (settings.radians) arcArrow(c, SHIELD_R + 48, -100, -40, '#5fd18b', 2);
+        text(`ω = ${settings.shieldW}°/s`, c.x, c.y - SHIELD_R - 58, '#5fd18b', 12, 'center');
+        // The boss orbits too
+        dashed(true); circle(BOSS_HOME, BOSS_ORBIT_R, null, 'rgba(255,107,107,.5)', 1); dashed(false);
+        line(BOSS_HOME, boss.pos, 'rgba(255,107,107,.7)', 1.5);
+        text(`boss: r ${BOSS_ORBIT_R}, ω ${BOSS_OMEGA}°/s`, BOSS_HOME.x + BOSS_ORBIT_R + BOSS_R + 10, BOSS_HOME.y, '#ff6b6b', 12);
+      },
+      live() {
+        const w = settings.shieldW, wr = w * DEG;
+        const lines = orbs.map(o => {
+          const a = wrap360(state.shieldAngle + o.i * 120), off = sub(o.pos, player.pos);
+          return ` orb ${o.i}  θ = ${f0(a).padStart(3)}°  offset (${f0(off.x)}, ${f0(off.y)})${o.cd > 0 ? '  recharging' : ''}`;
+        }).join('\n');
+        return `ω = ${w}°/s = ${f3(wr)} rad/s\nperiod T = 360 / ${w} = ${f2(360 / w)} s\norb speed = ${f3(wr)} × ${SHIELD_R} = ${f1(wr * SHIELD_R)} px/s\n${lines}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see the circles, angles and orbits behind every pattern.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+
+  // ---------- Loop ----------
+  reset();
+  renderCard();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

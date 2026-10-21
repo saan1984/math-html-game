@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artillery</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Artillery</h1>
+    <p class="sub">Stop the trucks before they reach your wall and shoot down drones and balloons. Every shell follows p(t) = p₀ + v₀t + ½gt².</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Angle</b> W/S or ↑/↓ · <b>Power</b> A/D or ←/→ (Shift = fine) · <b>Fire</b> Space ·
+      <b>Weapon</b> Q (shell / flak) · <b>Lock target</b> hover or Tab · <b>Auto-aim</b> T (lenses 4–5, half points) ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dot = (a, b) => a.x * b.x + a.y * b.y;
+  const dist = (a, b) => len(sub(a, b));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const vs = (v, f = f0) => `(${f(v.x)}, ${f(v.y)})`;
+  const RAD = Math.PI / 180;
+
+  // ---------- The physics constants (y-down screen: gravity is +y) ----------
+  const G = 400;                 // px/s², pointing DOWN the screen
+  const GVEC = V(0, G);
+  const CANNON = V(100, 540);    // launch point (the barrel's pivot)
+  const GROUND_Y = 620;          // flat ground, 80 px below the cannon
+  const WALL_X = 200;            // trucks that reach your wall cost a heart
+  const BLAST = 34;              // shell blast radius
+  const SHELL_COOLDOWN = 1.0;
+  const FLAK_SPEED = 900;        // flak rockets fly straight: their motor cancels gravity
+  const FLAK_COOLDOWN = 0.35;
+  const EULER_STEP = 0.1;        // the crude preview's step
+  const ROUND_TIME = 120;
+  const ANGLE_MIN = -20, ANGLE_MAX = 85, POWER_MIN = 200, POWER_MAX = 800;
+
+  const settings = {
+    exactPreview: true,          // pitfall when false: step-by-step preview drifts
+    lead: true,                  // pitfall when false: aim where the target is now
+    highArc: false,
+  };
+
+  // ---------- Canvas ----------
+  const WORLD = { w: 1200, h: 700 };
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  let mouse = null;
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'tab'].includes(k)) e.preventDefault();
+    if (!started) { started = true; }
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (!state.over && !paused) {
+      if (k === ' ') fire();
+      if (k === 'q') weapon = weapon === 'shell' ? 'flak' : 'shell';
+      if (k === 'tab') cycleLock();
+      if (k === 't') autoAim();
+    }
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  function toWorld(e) {
+    const r = canvas.getBoundingClientRect();
+    return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+  }
+  canvas.addEventListener('pointermove', e => { mouse = toWorld(e); lockNearMouse(); });
+  canvas.addEventListener('pointerleave', () => { mouse = null; });
+  canvas.addEventListener('pointerdown', e => {
+    started = true; mouse = toWorld(e);
+    if (state.over) { reset(); return; }
+    lockNearMouse();
+  });
+
+  // ---------- State ----------
+  let state, aim, weapon, shells, flak, targets, blasts, popups, lockId, nextId, spawn, lastShell;
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, hearts: 3, hits: 0, shots: 0, cd: 0 };
+    aim = { angle: 45, power: 500, assisted: false };
+    weapon = 'shell';
+    shells = []; flak = []; targets = []; blasts = []; popups = [];
+    lockId = null; nextId = 1; lastShell = null;
+    spawn = { truck: 1.5, drone: 9, balloon: 4 };
+  }
+  reset();
+
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.3 }); }
+
+  // ---------- Targets (constant velocity, so their future is easy to predict) ----------
+  function spawnTruck() {
+    const speed = Math.min(85, 40 + state.time * 0.3) * rand(0.9, 1.1);
+    targets.push({ id: nextId++, kind: 'truck', pos: V(1250, GROUND_Y - 16), vel: V(-speed, 0), r: 22, pts: 100 });
+  }
+  function spawnDrone() {
+    const right = Math.random() < 0.5;
+    const sp = rand(90, 150);
+    targets.push({ id: nextId++, kind: 'drone', pos: V(right ? 1230 : -30, rand(130, 330)), vel: V(right ? -sp : sp, 0), r: 16, pts: 150 });
+  }
+  function spawnBalloon() {
+    targets.push({ id: nextId++, kind: 'balloon', pos: V(rand(420, 1100), GROUND_Y + 30), vel: V(0, -rand(28, 42)), r: 18, pts: 50 });
+  }
+  const lockTarget = () => targets.find(t => t.id === lockId) || null;
+  function lockNearMouse() {
+    if (!mouse) return;
+    let best = null, bd = 140;
+    for (const t of targets) { const d = dist(t.pos, mouse); if (d < bd) { bd = d; best = t; } }
+    if (best) lockId = best.id;
+  }
+  function cycleLock() {
+    if (!targets.length) return;
+    const list = [...targets].sort((a, b) => a.pos.x - b.pos.x);
+    const i = list.findIndex(t => t.id === lockId);
+    lockId = list[(i + 1) % list.length].id;
+  }
+  function autoLock() {
+    if (lockTarget()) return;
+    const trucks = targets.filter(t => t.kind === 'truck').sort((a, b) => a.pos.x - b.pos.x);
+    const pick = trucks[0] || targets[0];
+    lockId = pick ? pick.id : null;
+  }
+
+  // ---------- The math ----------
+  // Exact position and velocity under constant acceleration (Chapter 24.3)
+  const posAt = (p0, v0, t) => add(add(p0, mul(v0, t)), mul(GVEC, 0.5 * t * t));
+  const velAt = (v0, t) => add(v0, mul(GVEC, t));
+  const launchVel = (angleDeg, power) => V(power * Math.cos(angleDeg * RAD), -power * Math.sin(angleDeg * RAD));
+
+  // Solve for the launch angle that passes through offset D = (X, Y) at speed v (Chapter 24.6).
+  // h = −Y is the height above the cannon. With u = tan θ:  a·u² − X·u + (a + h) = 0,  a = gX²/(2v²)
+  function solveAngles(D, v) {
+    const X = D.x, h = -D.y;
+    if (X <= 1) return null;
+    const a = G * X * X / (2 * v * v);
+    const disc = X * X - 4 * a * (a + h);
+    if (disc < 0) return { X, h, a, disc, none: true, vmin: Math.sqrt(G * (h + Math.hypot(h, X))) };
+    const r = Math.sqrt(disc);
+    const uLow = (X - r) / (2 * a), uHigh = (X + r) / (2 * a);
+    const low = Math.atan(uLow) / RAD, high = Math.atan(uHigh) / RAD;
+    const tf = th => X / (v * Math.cos(th * RAD));
+    return { X, h, a, disc, uLow, uHigh, low, high, tLow: tf(low), tHigh: tf(high) };
+  }
+  // Shell lead: guess the flight time, move the aim point there, solve again (Chapter 24.9)
+  function shellSolution(t, high) {
+    let P = V(t.pos.x, t.pos.y), sol = null;
+    const steps = [];
+    for (let i = 0; i < (settings.lead ? 6 : 1); i++) {
+      sol = solveAngles(sub(P, CANNON), aim.power);
+      if (!sol || sol.none) break;
+      const tf = high ? sol.tHigh : sol.tLow;
+      steps.push({ tf, x: P.x });
+      if (!settings.lead) break;
+      P = add(t.pos, mul(t.vel, tf));
+    }
+    const ok = sol && !sol.none;
+    return { sol, P, steps, ok, angle: ok ? (high ? sol.high : sol.low) : null, tf: ok ? (high ? sol.tHigh : sol.tLow) : null };
+  }
+  // Flak lead: |D + u·t| = w·t  →  (u·u − w²)t² + 2(D·u)t + D·D = 0 (Chapter 24.9)
+  function interceptTime(D, u, w) {
+    const a = dot(u, u) - w * w, b = 2 * dot(D, u), c = dot(D, D);
+    const disc = b * b - 4 * a * c;
+    if (disc < 0) return { a, b, c, disc, t: null };
+    const r = Math.sqrt(disc);
+    const roots = [(-b - r) / (2 * a), (-b + r) / (2 * a)].filter(x => x > 0).sort((x, y) => x - y);
+    return { a, b, c, disc, t: roots.length ? roots[0] : null };
+  }
+  function flakSolution(t) {
+    const D = sub(t.pos, CANNON);
+    if (!settings.lead) return { D, q: null, P: t.pos, angle: Math.atan2(-D.y, D.x) / RAD, tf: len(D) / FLAK_SPEED };
+    const q = interceptTime(D, t.vel, FLAK_SPEED);
+    if (q.t === null) return { D, q, P: null, angle: null, tf: null };
+    const P = add(t.pos, mul(t.vel, q.t));
+    const A = sub(P, CANNON);
+    return { D, q, P, angle: Math.atan2(-A.y, A.x) / RAD, tf: q.t };
+  }
+
+  function autoAim() {
+    if (!(LENSES[3].on || LENSES[4].on)) { popup(V(CANNON.x + 60, CANNON.y - 60), 'auto-aim: switch on lens 4 or 5', '#9aa3b2'); return; }
+    autoLock();
+    const t = lockTarget(); if (!t) return;
+    const s = weapon === 'shell' ? shellSolution(t, settings.highArc) : flakSolution(t);
+    if (s.angle === null) { popup(V(CANNON.x + 60, CANNON.y - 60), 'out of range: more power!', '#ff6b6b'); return; }
+    aim.angle = clamp(s.angle, ANGLE_MIN, ANGLE_MAX);
+    aim.assisted = true;
+  }
+
+  function fire() {
+    if (state.cd > 0) return;
+    const assisted = aim.assisted;
+    if (weapon === 'shell') {
+      const v0 = launchVel(aim.angle, aim.power);
+      const s = { p0: V(CANNON.x, CANNON.y), v0, age: 0, pos: V(CANNON.x, CANNON.y), vel: v0, assisted, prevPos: V(CANNON.x, CANNON.y), fd: V() };
+      shells.push(s); lastShell = s;
+      state.cd = SHELL_COOLDOWN;
+    } else {
+      const dir = V(Math.cos(aim.angle * RAD), -Math.sin(aim.angle * RAD));
+      flak.push({ pos: V(CANNON.x, CANNON.y), vel: mul(dir, FLAK_SPEED), life: 1.6, assisted });
+      state.cd = FLAK_COOLDOWN;
+    }
+    state.shots++;
+  }
+
+  function destroy(t, assisted, how) {
+    if (t.dead) return;
+    t.dead = true;
+    const pts = assisted ? t.pts / 2 : t.pts;
+    state.score += pts; state.hits++;
+    popup(V(t.pos.x, t.pos.y - 26), `+${pts}${assisted ? ' (auto)' : ''}`, how === 'flak' ? '#6cb8ff' : '#ffb547');
+  }
+  function explode(p, assisted) {
+    blasts.push({ pos: V(p.x, p.y), life: 0.45 });
+    for (const t of targets) if (dist(t.pos, p) < BLAST + t.r) destroy(t, assisted, 'shell');
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 22 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    for (const b of blasts) b.life -= dt;
+    blasts = blasts.filter(b => b.life > 0);
+    if (state.over) return;
+    state.time += dt;
+    state.cd = Math.max(0, state.cd - dt);
+    if (state.time >= ROUND_TIME) { state.over = 'time'; return; }
+
+    // Aiming (any manual change cancels the auto-aim flag)
+    const fine = keys.shift ? 0.2 : 1;
+    const da = ((keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0)) * 40 * fine * dt;
+    const dp = ((keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0)) * 250 * fine * dt;
+    if (da || dp) aim.assisted = false;
+    aim.angle = clamp(aim.angle + da, ANGLE_MIN, ANGLE_MAX);
+    aim.power = clamp(aim.power + dp, POWER_MIN, POWER_MAX);
+
+    // Spawning
+    spawn.truck -= dt; spawn.drone -= dt; spawn.balloon -= dt;
+    if (spawn.truck <= 0) { spawnTruck(); spawn.truck = Math.max(3.2, 7 - state.time * 0.035); }
+    if (spawn.drone <= 0) { spawnDrone(); spawn.drone = Math.max(4, 7.5 - state.time * 0.025); }
+    if (spawn.balloon <= 0) { spawnBalloon(); spawn.balloon = rand(4.5, 6.5); }
+
+    // Targets move with constant velocity: p ← p + v·Δt
+    for (const t of targets) {
+      t.pos = add(t.pos, mul(t.vel, dt));
+      if (t.kind === 'truck' && t.pos.x - t.r < WALL_X) {
+        t.dead = true; state.hearts--;
+        popup(V(WALL_X + 20, GROUND_Y - 60), 'wall hit!', '#ff6b6b');
+        if (state.hearts <= 0) state.over = 'overrun';
+      }
+    }
+
+    // Shells: evaluate the exact formula at their age (in small slices, so nothing is skipped)
+    for (const s of shells) {
+      const n = Math.max(1, Math.ceil(dt / (1 / 120)));
+      s.prevPos = s.pos;
+      for (let i = 0; i < n && !s.done; i++) {
+        s.age += dt / n;
+        s.pos = posAt(s.p0, s.v0, s.age);
+        s.vel = velAt(s.v0, s.age);
+        for (const t of targets) if (!t.dead && dist(t.pos, s.pos) < t.r + 5) { s.done = true; break; }
+        if (s.pos.y >= GROUND_Y) { s.pos.y = GROUND_Y; s.done = true; }
+        if (s.pos.x > WORLD.w + 80 || s.pos.x < -80) { s.done = true; s.lost = true; }
+      }
+      s.fd = dt > 0 ? mul(sub(s.pos, s.prevPos), 1 / dt) : V();   // Δp / Δt over this frame
+      if (s.done && !s.lost) explode(s.pos, s.assisted);
+    }
+    shells = shells.filter(s => !s.done);
+
+    // Flak: straight line at constant speed, air targets only
+    for (const f of flak) {
+      const n = Math.max(1, Math.ceil(dt / (1 / 120)));
+      for (let i = 0; i < n && !f.done; i++) {
+        f.pos = add(f.pos, mul(f.vel, dt / n));
+        for (const t of targets) if (!t.dead && t.kind !== 'truck' && dist(t.pos, f.pos) < t.r + 5) {
+          destroy(t, f.assisted, 'flak'); f.done = true; blasts.push({ pos: V(f.pos.x, f.pos.y), life: 0.25, small: true }); break;
+        }
+      }
+      f.life -= dt;
+      if (f.life <= 0 || f.pos.y >= GROUND_Y) f.done = true;
+    }
+    flak = flak.filter(f => !f.done);
+
+    targets = targets.filter(t => !t.dead && t.pos.x > -60 && t.pos.x < 1290 && t.pos.y > -50);
+    autoLock();
+  }
+
+  // ---------- Previews ----------
+  function exactPath(angle, power, tMax = 6) {
+    const v0 = launchVel(angle, power), pts = [];
+    for (let t = 0; t <= tMax; t += 0.05) {
+      const p = posAt(CANNON, v0, t);
+      pts.push({ p, t });
+      if (p.y >= GROUND_Y || p.x > WORLD.w + 40) break;
+    }
+    return pts;
+  }
+  // Crude preview: explicit Euler with a big step. Positions lag behind the true curve.
+  function eulerPath(angle, power, tMax = 6) {
+    let p = V(CANNON.x, CANNON.y), v = launchVel(angle, power);
+    const pts = [{ p, t: 0 }];
+    for (let t = EULER_STEP; t <= tMax + 1e-9; t += EULER_STEP) {
+      p = add(p, mul(v, EULER_STEP));
+      v = add(v, mul(GVEC, EULER_STEP));
+      pts.push({ p, t });
+      if (p.y >= GROUND_Y || p.x > WORLD.w + 40) break;
+    }
+    return pts;
+  }
+  // Time to come down to height y (y-down): ½g t² − vᵧ↑ t − (y − y₀) = 0, larger root
+  function timeToY(angle, power, y) {
+    const vy = power * Math.sin(angle * RAD), drop = y - CANNON.y;
+    const disc = vy * vy + 2 * G * drop;
+    return disc < 0 ? null : (vy + Math.sqrt(disc)) / G;
+  }
+
+  // ---------- Drawing ----------
+  function arrow(from, vec, color, label, lw = 2.5) {
+    const to = add(from, vec);
+    if (len(vec) < 2) return;
+    const a = Math.atan2(vec.y, vec.x);
+    ctx.strokeStyle = ctx.fillStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * 10, to.y - Math.sin(a - .4) * 10);
+    ctx.lineTo(to.x - Math.cos(a + .4) * 10, to.y - Math.sin(a + .4) * 10);
+    ctx.closePath(); ctx.fill();
+    if (label) text(label, to.x + 6, to.y - 6, color, 13);
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function polyline(pts, color, lw = 2, dash = null) {
+    if (pts.length < 2) return;
+    ctx.setLineDash(dash || []);
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.beginPath();
+    pts.forEach((q, i) => i ? ctx.lineTo(q.p.x, q.p.y) : ctx.moveTo(q.p.x, q.p.y));
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  function drawTarget(t) {
+    const p = t.pos;
+    if (t.kind === 'truck') {
+      const dir = Math.sign(t.vel.x) || -1;
+      ctx.fillStyle = '#5b4a36'; ctx.fillRect(p.x - 26, p.y - 12, 52, 22);
+      ctx.fillStyle = '#7a644a'; ctx.fillRect(p.x + (dir < 0 ? -26 : 8), p.y - 20, 18, 12);
+      circle(V(p.x - 15, p.y + 11), 6, '#22262f', '#9aa3b2', 1.5);
+      circle(V(p.x + 15, p.y + 11), 6, '#22262f', '#9aa3b2', 1.5);
+    } else if (t.kind === 'drone') {
+      ctx.fillStyle = '#3a4152'; ctx.fillRect(p.x - 14, p.y - 4, 28, 8);
+      ctx.strokeStyle = '#b48cff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(p.x - 20, p.y - 8); ctx.lineTo(p.x - 8, p.y - 8);
+      ctx.moveTo(p.x + 8, p.y - 8); ctx.lineTo(p.x + 20, p.y - 8); ctx.stroke();
+      circle(p, 3, '#ff6b6b');
+    } else {
+      ctx.strokeStyle = '#9aa3b2'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y + 18); ctx.lineTo(p.x, p.y + 34); ctx.stroke();
+      circle(p, 16, '#c0455a', '#ff8fa0', 2);
+    }
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+
+    // Sky and ground
+    ctx.fillStyle = '#131a26'; ctx.fillRect(0, 0, WORLD.w, GROUND_Y);
+    ctx.strokeStyle = '#1a2130'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 100) { ctx.moveTo(x, 0); ctx.lineTo(x, GROUND_Y); }
+    for (let y = 20; y <= GROUND_Y; y += 100) { ctx.moveTo(0, y); ctx.lineTo(WORLD.w, y); }
+    ctx.stroke();
+    ctx.fillStyle = '#26301f'; ctx.fillRect(0, GROUND_Y, WORLD.w, WORLD.h - GROUND_Y);
+    ctx.fillStyle = '#3d4a2c'; ctx.fillRect(0, GROUND_Y, WORLD.w, 4);
+    // Wall
+    ctx.fillStyle = '#4a5162'; ctx.fillRect(WALL_X - 10, GROUND_Y - 46, 10, 46);
+    for (let y = GROUND_Y - 46; y < GROUND_Y; y += 12) { ctx.fillStyle = '#5c6476'; ctx.fillRect(WALL_X - 10, y, 10, 2); }
+
+    const lock = lockTarget();
+    // Gameplay preview (always on): exact formula, or the crude Euler steps when the pitfall is on
+    if (weapon === 'shell') {
+      const pts = settings.exactPreview ? exactPath(aim.angle, aim.power) : eulerPath(aim.angle, aim.power);
+      ctx.fillStyle = settings.exactPreview ? 'rgba(230,233,239,.55)' : 'rgba(255,181,71,.75)';
+      pts.forEach((q, i) => { if (settings.exactPreview ? i % 2 === 0 : true) { ctx.beginPath(); ctx.arc(q.p.x, q.p.y, 2.2, 0, Math.PI * 2); ctx.fill(); } });
+      if (!settings.exactPreview) polyline(pts, 'rgba(255,181,71,.45)', 1.5);
+    } else {
+      const dir = V(Math.cos(aim.angle * RAD), -Math.sin(aim.angle * RAD));
+      polyline([{ p: CANNON }, { p: add(CANNON, mul(dir, FLAK_SPEED * 1.6)) }], 'rgba(108,184,255,.35)', 1.5, [4, 8]);
+    }
+
+    for (const t of targets) drawTarget(t);
+    if (lock) {
+      ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+      ctx.strokeRect(lock.pos.x - lock.r - 8, lock.pos.y - lock.r - 8, 2 * lock.r + 16, 2 * lock.r + 16);
+      ctx.setLineDash([]);
+    }
+
+    // Cannon on its tower
+    ctx.fillStyle = '#2b3242'; ctx.fillRect(70, 552, 60, GROUND_Y - 552);
+    const bdir = V(Math.cos(aim.angle * RAD), -Math.sin(aim.angle * RAD));
+    ctx.strokeStyle = weapon === 'shell' ? '#c9d1de' : '#6cb8ff'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(CANNON.x, CANNON.y); ctx.lineTo(CANNON.x + bdir.x * 34, CANNON.y + bdir.y * 34); ctx.stroke();
+    ctx.lineCap = 'butt';
+    circle(CANNON, 13, '#3a4152', '#9aa3b2', 2);
+
+    for (const s of shells) circle(s.pos, 5, '#ffd166', '#a07a1f', 1.5);
+    for (const f of flak) {
+      const tail = sub(f.pos, mul(norm(f.vel), 16));
+      ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(tail.x, tail.y); ctx.lineTo(f.pos.x, f.pos.y); ctx.stroke();
+    }
+    for (const b of blasts) {
+      const k = 1 - b.life / (b.small ? 0.25 : 0.45);
+      circle(b.pos, (b.small ? 14 : BLAST) * (0.4 + 0.6 * k), `rgba(255,181,71,${0.5 * (1 - k)})`, `rgba(255,209,102,${1 - k})`, 2);
+    }
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    text(`${'♥'.repeat(Math.max(0, state.hearts))}${'♡'.repeat(3 - Math.max(0, state.hearts))}`, 24, 34, '#ff6b6b', 20);
+    text(`score ${f0(state.score)}   time left ${Math.max(0, ROUND_TIME - state.time).toFixed(0)}s   weapon ${weapon.toUpperCase()}${state.cd > 0 ? ' (reloading)' : ''}`, 120, 32, '#9aa3b2', 13);
+    text(`angle ${f1(aim.angle)}°   power ${f0(aim.power)} px/s${aim.assisted ? '   AUTO-AIM' : ''}`, 24, 686, aim.assisted ? '#ffb547' : '#e6e9ef', 14);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('ARTILLERY', ['Stop the trucks before they reach your wall', 'W/S angle · A/D power · Space fire · Q switch to flak for drones and balloons', 'Press any key to start']);
+    else if (state.over === 'time') overlay('CEASEFIRE', [`score ${f0(state.score)} · ${state.hits} hits from ${state.shots} shots`, 'Press R or click to play again']);
+    else if (state.over === 'overrun') overlay('WALL BREACHED', [`score ${f0(state.score)} · survived ${state.time.toFixed(0)} s`, 'Press R or click to try again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // Mini graphs for the rates-of-change lens (world coordinates, top-left of the sky)
+  function miniGraph(x, y, w, h, title, fn, tMax, lo, hi, now, color) {
+    ctx.fillStyle = 'rgba(17,21,28,.88)'; ctx.fillRect(x - 6, y - 18, w + 12, h + 26);
+    ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+    const Y = v => y + h - (v - lo) / (hi - lo) * h;
+    if (lo < 0 && hi > 0) { ctx.strokeStyle = '#3a4152'; ctx.beginPath(); ctx.moveTo(x, Y(0)); ctx.lineTo(x + w, Y(0)); ctx.stroke(); }
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    for (let i = 0; i <= 60; i++) { const t = tMax * i / 60, px = x + w * i / 60, py = Y(fn(t)); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.stroke();
+    if (now !== null) { const px = x + w * clamp(now / tMax, 0, 1); circle(V(px, Y(fn(clamp(now, 0, tMax)))), 4, '#ffd166'); }
+    text(title, x, y - 5, color, 11);
+  }
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'Rates of change', chap: 'Chapter 24.1–24.3',
+      formula: 'v = rate of change of p   (Δp/Δt as Δt → 0)\na = rate of change of v\nconstant a:  v(t) = v₀ + a·t\n             p(t) = p₀ + v₀t + ½at²',
+      used: ['Every projectile, jump and fall', 'Reading speed from position samples (replays, networking)',
+        'Acceleration and braking in racing games', 'Camera shake and recoil curves'],
+      tryThis: 'Fire a high shot and watch the graphs: height is a parabola, vertical velocity is a straight line, and acceleration never changes. At the top the yellow arrow (v) points straight sideways: its vertical part is zero.',
+      draw() {
+        const s = lastShell && shells.includes(lastShell) ? lastShell : null;
+        const v0 = s ? s.v0 : launchVel(aim.angle, aim.power);
+        const tf = timeToY(aim.angle, aim.power, GROUND_Y) || 3;
+        const T = s ? (timeToY(Math.atan2(-s.v0.y, s.v0.x) / RAD, len(s.v0), GROUND_Y) || 3) : tf;
+        const now = s ? s.age : null;
+        const vy0 = -v0.y;
+        const hMax = Math.max(80, vy0 * vy0 / (2 * G));
+        miniGraph(40, 80, 240, 70, 'height above cannon  h(t)', t => vy0 * t - 0.5 * G * t * t, T, -90, hMax * 1.05, now, '#5fd18b');
+        miniGraph(40, 190, 240, 70, 'upward velocity  vᵧ↑(t) = slope of h', t => vy0 - G * t, T, -Math.max(vy0, 1) - 60, Math.max(vy0, 1) * 1.05, now, '#ffd166');
+        miniGraph(40, 300, 240, 40, 'acceleration  = −400 (constant)', () => -G, T, -500, 100, now, '#ff6b6b');
+        if (s) {
+          arrow(s.pos, mul(s.vel, 0.25), '#ffd166', 'v');
+          arrow(s.pos, mul(GVEC, 0.15), '#ff6b6b', 'a');
+        } else text('fire a shell to follow it', CANNON.x + 40, CANNON.y - 100, '#9aa3b2', 12);
+      },
+      live() {
+        const s = lastShell && shells.includes(lastShell) ? lastShell : null;
+        if (!s) return 'fire a shell (Space) to see\nits position, velocity and\nacceleration change live';
+        return `newest shell, age t = ${f2(s.age)} s\np(t) = p₀ + v₀t + ½gt²\n     = ${vs(s.pos)}\nv(t) = v₀ + gt\n     = ${vs(s.vel)}\nΔp/Δt (last frame) = ${vs(s.fd)}\na = g = (0, ${G})  never changes\n\nUp is −y on screen, so\ngravity is +${G} in y.`;
+      },
+    },
+    {
+      name: 'Trajectory preview', chap: 'Chapter 24.4 & 24.8',
+      formula: 'exact:  p(t) = p₀ + v₀t + ½gt²\ncrude:  p ← p + v·h,  v ← v + g·h\n        (h = 0.1 s)  drift ≈ ½·g·h·t',
+      used: ['Aiming arcs for grenades, slingshots and golf', 'Pool and mini-golf shot guides',
+        'Jump previews in level editors', 'Predicting where a ball will land (AI goalkeepers)'],
+      tryThis: 'Untick "Preview uses exact formula". The orange step-by-step preview now lands too far, and every shot falls short of where it promised. The faint white curve is where shells really go.',
+      controls: `<label><input type="checkbox" data-set="exactPreview"> Preview uses exact formula</label>`,
+      draw() {
+        if (weapon !== 'shell') { text('switch to shells (Q) to see the arc', CANNON.x + 40, CANNON.y - 100, '#9aa3b2', 12); return; }
+        const ex = exactPath(aim.angle, aim.power);
+        polyline(ex, 'rgba(230,233,239,.5)', 1.5);
+        for (const q of ex) {
+          const k = Math.round(q.t * 20);
+          if (k % 10 === 0 && k > 0) { circle(q.p, 4, '#e6e9ef'); text(`${f1(q.t)} s`, q.p.x + 8, q.p.y - 8, '#e6e9ef', 11); }
+        }
+        if (!settings.exactPreview) {
+          const eu = eulerPath(aim.angle, aim.power);
+          for (const q of eu) circle(q.p, 3, '#ffb547');
+          const tf = timeToY(aim.angle, aim.power, GROUND_Y);
+          if (tf) {
+            const k = Math.floor(tf / EULER_STEP);
+            const q = eu[Math.min(k, eu.length - 1)];
+            const truth = posAt(CANNON, launchVel(aim.angle, aim.power), q.t);
+            ctx.setLineDash([3, 3]); ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(q.p.x, q.p.y); ctx.lineTo(truth.x, truth.y); ctx.stroke(); ctx.setLineDash([]);
+            text(`drift ${f0(dist(q.p, truth))} px`, q.p.x + 8, (q.p.y + truth.y) / 2, '#ff6b6b', 12);
+          }
+        }
+      },
+      live() {
+        const tf = timeToY(aim.angle, aim.power, GROUND_Y);
+        const v0 = launchVel(aim.angle, aim.power);
+        const land = tf ? posAt(CANNON, v0, tf) : null;
+        let s = `v₀ = ${vs(v0)}\nlands after ${tf ? f2(tf) : '—'} s at x = ${land ? f0(land.x) : '—'}\n`;
+        if (settings.exactPreview) s += `\npreview: exact formula,\nsampled every 0.05 s.\nNo error builds up.`;
+        else {
+          const drift = tf ? 0.5 * G * EULER_STEP * tf : 0;
+          s += `\npreview: Euler steps, h = ${EULER_STEP} s\nthe path is drawn too high:\ndrift ≈ ½·g·h·t = ½·${G}·${EULER_STEP}·${tf ? f2(tf) : '—'}\n      ≈ ${f0(drift)} px at landing time`;
+        }
+        return s;
+      },
+    },
+    {
+      name: 'Apex & range', chap: 'Chapter 24.5 & 24.7',
+      formula: 'vᵧ↑ = v·sin θ,  vₓ = v·cos θ\nt_apex = vᵧ↑ / g      H = vᵧ↑² / (2g)\nlevel:  t = 2·t_apex   R = v²·sin 2θ / g\njump design:  g = 2H/T²,  v₀ = 2H/T',
+      used: ['Designing platformer jumps from a height and a time', 'Max range of cannons and thrown items',
+        'Placing ledges a jump can just reach', 'Basketball and golf shot meters'],
+      tryThis: 'Set the angle to 45° and find the longest level range. Then check the jump-design line: 2H ÷ t_apex² always gives back g = 400.',
+      draw() {
+        if (weapon !== 'shell') return;
+        const v0 = launchVel(aim.angle, aim.power);
+        const vy = -v0.y, vx = v0.x;
+        const ex = exactPath(aim.angle, aim.power);
+        polyline(ex, 'rgba(95,209,139,.65)', 2);
+        ctx.setLineDash([5, 5]); ctx.strokeStyle = 'rgba(154,163,178,.6)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(CANNON.x, CANNON.y); ctx.lineTo(WORLD.w, CANNON.y); ctx.stroke(); ctx.setLineDash([]);
+        if (vy > 0) {
+          const ta = vy / G, Hh = vy * vy / (2 * G);
+          const apex = posAt(CANNON, v0, ta);
+          arrow(V(apex.x, CANNON.y), V(0, -Hh), '#5fd18b', null, 2);
+          circle(apex, 5, '#5fd18b');
+          text(`apex: t = ${f2(ta)} s, H = ${f0(Hh)} px`, apex.x + 10, apex.y - 10, '#5fd18b', 12);
+          const R = vx * 2 * ta;
+          if (CANNON.x + R < WORLD.w) { circle(V(CANNON.x + R, CANNON.y), 4, '#e6e9ef'); text(`R = ${f0(R)}`, CANNON.x + R + 8, CANNON.y - 8, '#e6e9ef', 12); }
+        }
+      },
+      live() {
+        const v0 = launchVel(aim.angle, aim.power), vy = -v0.y, vx = v0.x;
+        if (vy <= 0) return `aiming at or below horizontal:\nno apex above the cannon`;
+        const ta = vy / G, Hh = vy * vy / (2 * G), tg = timeToY(aim.angle, aim.power, GROUND_Y);
+        return `θ = ${f1(aim.angle)}°, v = ${f0(aim.power)}\nvₓ = ${f0(vx)}   vᵧ↑ = ${f0(vy)}\nt_apex = ${f0(vy)}/${G} = ${f2(ta)} s\nH = ${f0(vy)}²/(2·${G}) = ${f0(Hh)} px\nlevel: t = ${f2(2 * ta)} s, R = ${f0(vx * 2 * ta)} px\nground (80 px lower): t = ${f2(tg)} s\n                      x = ${f0(vx * tg)} px\njump check: 2H/t_apex² = ${f0(2 * Hh / (ta * ta))}`;
+      },
+    },
+    {
+      name: 'Auto-aim: solve θ', chap: 'Chapter 24.6',
+      formula: 'target offset (X, h),  h = height above cannon\nu = tan θ,  a = gX² / (2v²)\na·u² − X·u + (a + h) = 0\nu = (X ± √(X² − 4a(a + h))) / (2a)',
+      used: ['Enemy artillery and grenade-throwing AI', 'Turrets that lob shells over walls',
+        'Auto-aim and "assist" modes', 'Checking whether a target is reachable at all'],
+      tryThis: 'Lock a target (hover it, or Tab) and press T: the barrel snaps to the solved angle. Two arcs reach the same point. Tick "High arc" for the lob. Lower the power until the discriminant goes negative: out of range.',
+      controls: `<label><input type="checkbox" data-set="highArc"> Snap to the high arc</label>`,
+      draw() {
+        const t = lockTarget(); if (!t || weapon !== 'shell') return;
+        const s = shellSolution(t, settings.highArc);
+        if (!s.ok) { text('out of range at this power', t.pos.x, t.pos.y - 30, '#ff6b6b', 12, 'center'); return; }
+        for (const [ang, col] of [[s.sol.low, 'rgba(95,209,139,.8)'], [s.sol.high, 'rgba(180,140,255,.8)']]) {
+          const pts = exactPath(ang, aim.power).filter(q => q.p.x <= s.P.x + 2);
+          polyline(pts, col, 2, [6, 5]);
+        }
+        circle(s.P, 6, null, '#ffb547', 2);
+        text(`low ${f1(s.sol.low)}°  high ${f1(s.sol.high)}°`, s.P.x, s.P.y - 34, '#e6e9ef', 12, 'center');
+      },
+      live() {
+        const t = lockTarget(); if (!t) return 'no target locked';
+        if (weapon !== 'shell') return 'switch to shells (Q)';
+        const s = shellSolution(t, settings.highArc), q = s.sol;
+        if (!q) return 'target is behind the cannon';
+        let out = `aim point ${vs(s.P)}${settings.lead ? ' (led)' : ''}\nX = ${f0(q.X)}   h = ${f0(q.h)}   v = ${f0(aim.power)}\na = gX²/(2v²) = ${f1(q.a)}\nX² − 4a(a + h) = ${f0(q.disc)}`;
+        if (q.none) return out + `\n< 0: no angle works.\nneed v ≥ √(g(h + √(h² + X²)))\n       = ${f0(q.vmin)} px/s`;
+        return out + `\ntan θ = ${f2(q.uLow)} or ${f2(q.uHigh)}\nθ = ${f1(q.low)}° (flight ${f2(q.tLow)} s)\n  or ${f1(q.high)}° (flight ${f2(q.tHigh)} s)`;
+      },
+    },
+    {
+      name: 'Leading targets', chap: 'Chapter 24.9',
+      formula: 'straight shot (flak):\n|D + u·t| = w·t\n(u·u − w²)t² + 2(D·u)t + D·D = 0\nshell: guess t, aim at P + u·t, re-solve',
+      used: ['Turrets and AI hitting moving players', 'Passing to a running teammate',
+        'Homing-free missiles and thrown spears', 'Intercept courses for ships and fighters'],
+      tryThis: 'Lock a truck or drone, press T, and fire. Then untick "Lead target" and do the same: the shot lands where the target was, behind it.',
+      controls: `<label><input type="checkbox" data-set="lead"> Lead target</label>`,
+      draw() {
+        const t = lockTarget(); if (!t) return;
+        arrow(t.pos, mul(t.vel, 0.6), '#6cb8ff', 'u');
+        const s = weapon === 'shell' ? shellSolution(t, settings.highArc) : flakSolution(t);
+        if (!s.P) return;
+        if (settings.lead) {
+          ctx.globalAlpha = 0.45; drawTarget({ ...t, pos: s.P }); ctx.globalAlpha = 1;
+          ctx.setLineDash([4, 4]); ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(t.pos.x, t.pos.y); ctx.lineTo(s.P.x, s.P.y); ctx.stroke(); ctx.setLineDash([]);
+          text(`lead ${f0(dist(t.pos, s.P))} px`, (t.pos.x + s.P.x) / 2, (t.pos.y + s.P.y) / 2 - 12, '#ffb547', 12, 'center');
+        }
+        if (weapon === 'flak') polyline([{ p: CANNON }, { p: s.P }], 'rgba(108,184,255,.7)', 1.5, [6, 5]);
+      },
+      live() {
+        const t = lockTarget(); if (!t) return 'no target locked';
+        const u = t.vel;
+        if (weapon === 'flak') {
+          if (t.kind === 'truck') return 'flak only hits air targets';
+          const s = flakSolution(t);
+          if (!settings.lead) return `NOT leading: aim at the target now\nflight ${f2(s.tf)} s, target moves\n${f0(len(u) * s.tf)} px meanwhile: a miss`;
+          if (s.tf === null) return 'no intercept';
+          return `D = ${vs(s.D)}   u = ${vs(u)}\nw = ${FLAK_SPEED}\n(u·u − w²) = ${f0(s.q.a)}\n2(D·u)     = ${f0(s.q.b)}\nD·D        = ${f0(s.q.c)}\nt = ${f2(s.tf)} s (the positive root)\naim at P = ${vs(s.P)}\nθ = ${f1(s.angle)}°`;
+        }
+        const s = shellSolution(t, settings.highArc);
+        if (!s.ok) return 'out of range at this power';
+        if (!settings.lead) return `NOT leading: aim at the target now\nflight ${f2(s.tf)} s, target moves\n${f0(len(u) * s.tf)} px meanwhile: a miss`;
+        return `u = ${vs(u)}\nguess → flight time → new aim x\n` + s.steps.map((k, i) => ` ${i}: x = ${f0(k.x)}  t = ${f2(k.tf)} s`).join('\n') + `\naim at ${vs(s.P)}, θ = ${f1(s.angle)}°`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see the calculus behind every shell.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

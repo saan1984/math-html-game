@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Arm</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Robot Arm</h1>
+    <p class="sub">Move all four crates into the bin. Every link is a transform chained onto the one before it.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Joints</b> Q / E shoulder · A / D elbow · Z / C wrist ·
+      <b>Or</b> click a link, then drag: it turns toward the mouse ·
+      <b>Grab / release</b> Space ·
+      <b>Select joint</b> Tab ·
+      <b>Lenses</b> keys 1–4 · <b>Restart</b> R
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Basics ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const len = a => Math.hypot(a.x, a.y);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const RAD = Math.PI / 180, deg = r => r * 180 / Math.PI;
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const P1 = p => `(${f1(p.x)}, ${f1(p.y)})`;
+
+  // ---------- 3×3 homogeneous matrices (Chapter 15) ----------
+  // Row arrays, column-vector convention:  p′ = M p,  p = (x, y, w).
+  //   [ a  c  tx ]
+  //   [ b  d  ty ]
+  //   [ 0  0  1  ]
+  const ID3 = () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const T3 = (x, y) => [[1, 0, x], [0, 1, y], [0, 0, 1]];
+  const R3 = t => { const c = Math.cos(t), s = Math.sin(t); return [[c, -s, 0], [s, c, 0], [0, 0, 1]]; };
+  const mm = (A, B) => A.map((_, i) => B[0].map((_, j) => A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j]));
+  const mmN = (...Ms) => Ms.reduce((acc, m) => mm(acc, m));
+  const apply = (M, p, w = 1) => V(M[0][0] * p.x + M[0][1] * p.y + M[0][2] * w, M[1][0] * p.x + M[1][1] * p.y + M[1][2] * w);
+  const tr = M => M[0].map((_, j) => M.map(r => r[j]));
+  // Inverse of an affine matrix [A t; 0 1]:  [A⁻¹  −A⁻¹ t; 0 1]
+  function inv3(M) {
+    const a = M[0][0], c = M[0][1], b = M[1][0], d = M[1][1], tx = M[0][2], ty = M[1][2];
+    const det = a * d - b * c;
+    if (Math.abs(det) < 1e-9) return ID3();
+    const ia = d / det, ic = -c / det, ib = -b / det, id = a / det;
+    return [[ia, ic, -(ia * tx + ic * ty)], [ib, id, -(ib * tx + id * ty)], [0, 0, 1]];
+  }
+  const rowStr = (r, w = 8, f = f2) => r.map(v => f(v).padStart(w)).join(' ');
+  const matStr = (M, indent = '', w = 8, f = f2) => M.map(r => `${indent}[${rowStr(r, w, f)} ]`).join('\n');
+
+  // ---------- Settings (lens switches) ----------
+  const settings = {
+    trOrder: true,        // local = T(offset) · R(θ)   (pitfall when off: R · T)
+    useInverse: true,     // picking uses W⁻¹            (pitfall when off: W)
+    rowConv: false,       // display matrices in the row-vector convention
+    showHint: true,
+  };
+
+  // ---------- Constants ----------
+  const VW = 960, VH = 600, FLOOR = 540;
+  const BASE = V(430, 500);                            // shoulder, in world space
+  const LINKS = [
+    { name: 'upper arm', len: 170, w: 28, offset: BASE, min: -175 * RAD, max: 25 * RAD, col: '#2a4f78', edge: '#6cb8ff' },
+    { name: 'forearm',   len: 150, w: 22, offset: V(170, 0), min: -155 * RAD, max: 155 * RAD, col: '#3d6fa3', edge: '#6cb8ff' },
+    { name: 'hand',      len: 70,  w: 30, offset: V(150, 0), min: -120 * RAD, max: 120 * RAD, col: '#336494', edge: '#6cb8ff' },
+  ];
+  const TIP = V(68, 0);                                // fingertip, in hand space
+  const CRATE = 22;                                    // half-size of a crate
+  const BIN = { x0: 70, x1: 250 };
+  const GRAB_PAD = 8;
+
+  // ---------- State ----------
+  let theta, crates, held, sel, grip, scored, time, finished, started, drag, flash;
+  function reset() {
+    theta = [-72 * RAD, 70 * RAD, 20 * RAD];
+    crates = [[590, 8], [655, -10], [725, 6], [790, -7]].map(([x, tilt], i) => ({
+      id: i + 1, x, y: FLOOR - CRATE, ang: tilt * RAD, vy: 0, state: 'floor', local: null }));
+    held = null; sel = 0; grip = 1; scored = 0; time = 0; finished = false; drag = null; flash = [];
+  }
+  reset();
+  started = false;
+
+  // ---------- The chain ----------
+  // local_i = T(offset) · R(θ)   — move to the joint, then turn about it
+  const localM = i => settings.trOrder
+    ? mm(T3(LINKS[i].offset.x, LINKS[i].offset.y), R3(theta[i]))
+    : mm(R3(theta[i]), T3(LINKS[i].offset.x, LINKS[i].offset.y));
+  function chain() {
+    const L = [0, 1, 2].map(localM), W = [L[0]];
+    W.push(mm(W[0], L[1])); W.push(mm(W[1], L[2]));
+    return { L, W };
+  }
+  const tipWorld = W => apply(W[2], TIP);
+  const crateWorld = c => c.state === 'held' ? mm(chain().W[2], c.local) : mm(T3(c.x, c.y), R3(c.ang));
+  const angOf = M => Math.atan2(M[1][0], M[0][0]);
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VW, H / VH);
+    OX = (W - VW * S) / 2; OY = (H - VH * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+  const setScreen = () => ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+  const setM = M => { const k = DPR * S; ctx.setTransform(k * M[0][0], k * M[1][0], k * M[0][1], k * M[1][1], k * M[0][2] + DPR * OX, k * M[1][2] + DPR * OY); };
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { s: V(480, 300) };
+  const toVirtual = e => { const r = canvas.getBoundingClientRect(); return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S); };
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-4]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'tab', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    started = true;
+    if (!e.repeat) {
+      if (k === 'r') reset();
+      if (k === ' ') toggleGrab();
+      if (k === 'tab') sel = (sel + (e.shiftKey ? 2 : 1)) % 3;
+    }
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; drag = null; });
+
+  // Picking: bring the mouse into each link's own space with W⁻¹ and test a plain box.
+  function pickLink(m, Ws) {
+    for (let i = 2; i >= 0; i--) {
+      const p = apply(settings.useInverse ? inv3(Ws[i]) : Ws[i], m), l = LINKS[i];
+      if (p.x >= -8 && p.x <= (i === 2 ? 74 : l.len + 8) && Math.abs(p.y) <= l.w / 2 + 6) return i;
+    }
+    return -1;
+  }
+  canvas.addEventListener('pointermove', e => {
+    mouse.s = toVirtual(e);
+    if (drag !== null) aimJoint(drag, mouse.s);
+  });
+  canvas.addEventListener('pointerdown', e => {
+    mouse.s = toVirtual(e); started = true;
+    if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+    const hit = pickLink(mouse.s, chain().W);
+    if (hit >= 0) { sel = hit; drag = hit; }
+  });
+  canvas.addEventListener('pointerup', () => { drag = null; });
+  // Turn joint i so its link points at the mouse: the mouse, seen from the joint's frame, has angle θ.
+  function aimJoint(i, m) {
+    const Wp = i === 0 ? ID3() : chain().W[i - 1];
+    const joint = mm(Wp, T3(LINKS[i].offset.x, LINKS[i].offset.y));
+    const q = apply(inv3(i === 0 ? T3(BASE.x, BASE.y) : joint), m);
+    theta[i] = clamp(Math.atan2(q.y, q.x), LINKS[i].min, LINKS[i].max);
+  }
+
+  // ---------- Grab and release ----------
+  function toggleGrab() {
+    if (finished) { reset(); return; }
+    const { W } = chain();
+    if (held) {                                       // release: world = hand · local
+      const M = mm(W[2], held.local);
+      held.x = M[0][2]; held.y = M[1][2]; held.ang = angOf(M); held.vy = 0; held.state = 'fall'; held.local = null;
+      held = null; return;
+    }
+    const tip = tipWorld(W);
+    for (const c of crates) {
+      if (c.state === 'done') continue;
+      const p = apply(inv3(crateWorld(c)), tip);       // fingertip in the crate's own space
+      if (Math.abs(p.x) <= CRATE + GRAB_PAD && Math.abs(p.y) <= CRATE + GRAB_PAD) {
+        c.local = mm(inv3(W[2]), crateWorld(c));       // re-parent: local = hand⁻¹ · crate
+        c.state = 'held'; held = c; return;
+      }
+    }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    if (!finished) time += dt;
+    const turn = (kp, kn, i) => { const v = (keys[kp] ? 1 : 0) - (keys[kn] ? 1 : 0); if (v) { sel = i; theta[i] = clamp(theta[i] + v * 75 * RAD * dt, LINKS[i].min, LINKS[i].max); } };
+    turn('e', 'q', 0); turn('d', 'a', 1); turn('c', 'z', 2);
+    const v = (keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0);
+    if (v) theta[sel] = clamp(theta[sel] + v * 75 * RAD * dt, LINKS[sel].min, LINKS[sel].max);
+    grip += ((held ? 0 : 1) - grip) * Math.min(1, dt * 14);
+    for (const c of crates) {
+      if (c.state === 'fall') {
+        c.vy += 1100 * dt; c.y += c.vy * dt; c.ang *= Math.max(0, 1 - 6 * dt);
+        if (c.y >= FLOOR - CRATE) {
+          c.y = FLOOR - CRATE; c.ang = 0; c.vy = 0;
+          if (c.x > BIN.x0 + 12 && c.x < BIN.x1 - 12) { c.state = 'done'; scored++; flash.push({ x: c.x, y: FLOOR - 30, t: 1 }); }
+          else c.state = 'floor';
+        }
+      }
+    }
+    for (const f of flash) f.t -= dt;
+    flash = flash.filter(f => f.t > 0);
+    if (!finished && scored === crates.length) finished = true;
+  }
+
+  // ---------- Drawing ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 2, dash) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw; if (dash) ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  function arrow(from, to, color, lw = 2.5, head = 9) {
+    const v = sub(to, from); if (len(v) < 2) return;
+    const a = Math.atan2(v.y, v.x);
+    line(from, to, color, lw);
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * head, to.y - Math.sin(a - .4) * head);
+    ctx.lineTo(to.x - Math.cos(a + .4) * head, to.y - Math.sin(a + .4) * head);
+    ctx.closePath(); ctx.fill();
+  }
+  // Draws a frame's axes from its matrix, in screen space
+  function axes(M, size, label) {
+    const o = apply(M, V(0, 0)), x = apply(M, V(size, 0)), y = apply(M, V(0, size));
+    arrow(o, x, '#ff6b6b', 2.5, 8); arrow(o, y, '#5fd18b', 2.5, 8);
+    if (label) text(label, o.x + 8, o.y - 10, '#e6e9ef', 12);
+  }
+  const dispM = M => settings.rowConv ? tr(M) : M;
+
+  function drawCrate(c, W, highlight) {
+    setM(crateWorld(c));
+    ctx.fillStyle = '#5a3d1e'; ctx.fillRect(-CRATE, -CRATE, CRATE * 2, CRATE * 2);
+    ctx.strokeStyle = highlight ? '#ffb547' : '#d9a05b'; ctx.lineWidth = highlight ? 3 : 2; ctx.strokeRect(-CRATE, -CRATE, CRATE * 2, CRATE * 2);
+    ctx.strokeStyle = '#8a5f2d'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-CRATE, -CRATE); ctx.lineTo(CRATE, CRATE); ctx.moveTo(CRATE, -CRATE); ctx.lineTo(-CRATE, CRATE); ctx.stroke();
+    setScreen();
+  }
+  function drawArm(Ws) {
+    for (let i = 0; i < 3; i++) {
+      const l = LINKS[i];
+      setM(Ws[i]);
+      const L = i === 2 ? 40 : l.len;
+      ctx.fillStyle = l.col; ctx.fillRect(0, -l.w / 2, L, l.w);
+      ctx.strokeStyle = i === sel ? '#ffb547' : l.edge; ctx.lineWidth = i === sel ? 3 : 2; ctx.strokeRect(0, -l.w / 2, L, l.w);
+      if (i === 2) {                                           // two fingers that open and close
+        const g = 4 + 12 * grip;
+        ctx.fillStyle = '#9aa3b2';
+        ctx.fillRect(40, -g - 5, 28, 5); ctx.fillRect(40, g, 28, 5);
+      }
+      setScreen();
+    }
+    // joints drawn last, in screen space
+    for (let i = 0; i < 3; i++) circle(apply(Ws[i], V(0, 0)), 9, '#0f1218', i === sel ? '#ffb547' : '#6cb8ff', 3);
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    setScreen();
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
+    ctx.fillStyle = '#151a22'; ctx.fillRect(0, 0, VW, VH);
+    ctx.strokeStyle = '#1d2330'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= VW; x += 60) { ctx.moveTo(x, 0); ctx.lineTo(x, VH); }
+    for (let y = 0; y <= VH; y += 60) { ctx.moveTo(0, y); ctx.lineTo(VW, y); }
+    ctx.stroke();
+    ctx.fillStyle = '#1c222d'; ctx.fillRect(0, FLOOR, VW, VH - FLOOR);
+    line(V(0, FLOOR), V(VW, FLOOR), '#3a4357', 2);
+
+    // Bin
+    ctx.strokeStyle = '#5fd18b'; ctx.lineWidth = 4; ctx.beginPath();
+    ctx.moveTo(BIN.x0, FLOOR - 70); ctx.lineTo(BIN.x0, FLOOR); ctx.lineTo(BIN.x1, FLOOR); ctx.lineTo(BIN.x1, FLOOR - 70); ctx.stroke();
+    ctx.fillStyle = 'rgba(95,209,139,.10)'; ctx.fillRect(BIN.x0, FLOOR - 70, BIN.x1 - BIN.x0, 70);
+    text(`BIN  ${scored}/${crates.length}`, (BIN.x0 + BIN.x1) / 2, FLOOR - 78, '#5fd18b', 13, 'center');
+    for (let i = 0; i < scored; i++) { ctx.fillStyle = '#8a5f2d'; ctx.fillRect(BIN.x0 + 10 + (i % 3) * 52, FLOOR - 40 - Math.floor(i / 3) * 0, 44, 40); }
+
+    // Pedestal
+    ctx.fillStyle = '#242b38'; ctx.fillRect(BASE.x - 34, BASE.y + 4, 68, FLOOR - BASE.y - 4);
+    ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 2; ctx.strokeRect(BASE.x - 34, BASE.y + 4, 68, FLOOR - BASE.y - 4);
+
+    const { L, W: Ws } = chain();
+    for (const l of LENSES) if (l.on && l.under) l.under(L, Ws);
+    for (const c of crates) if (c.state !== 'done' && c.state !== 'held') drawCrate(c, Ws, false);
+    drawArm(Ws);
+    if (held) drawCrate(held, Ws, true);
+    for (const l of LENSES) if (l.on && l.over) l.over(L, Ws);
+
+    const tip = tipWorld(Ws);
+    circle(tip, 4, '#ffb547');
+    if (tip.y > FLOOR + 2) text('below the floor', tip.x + 10, tip.y + 4, '#ff6b6b', 12);
+    for (const f of flash) text('+1', f.x, f.y - (1 - f.t) * 40, '#5fd18b', 18, 'center');
+
+    // HUD
+    const M = dispM(Ws[sel]);
+    ctx.fillStyle = 'rgba(11,13,18,.82)'; ctx.fillRect(12, 12, 300, 108);
+    text(`world matrix of the ${LINKS[sel].name}${settings.rowConv ? '  (rows)' : ''}`, 22, 30, '#9aa3b2', 12);
+    M.forEach((r, i) => text(`[${rowStr(r)} ]`, 22, 54 + i * 20, '#e6e9ef', 14));
+    text(`${f0(deg(theta[0]))}°  ${f0(deg(theta[1]))}°  ${f0(deg(theta[2]))}°`, 22, 114, '#6cb8ff', 12);
+    text(`crates ${scored}/${crates.length}   time ${time.toFixed(1)} s   ${held ? 'HOLDING crate ' + held.id : 'hand open'}`, VW - 16, 28, '#9aa3b2', 13, 'right');
+    if (!started) overlay('ROBOT ARM', ['Move the four crates into the green bin', 'Q/E, A/D, Z/C turn the joints · or click a link and drag', 'Space closes the hand on a crate in reach, and opens it again', 'Press any key to start']);
+    else if (finished) overlay('ALL CRATES BINNED', [`${time.toFixed(1)} seconds`, 'Press R or Space to play again']);
+    ctx.restore();
+  }
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, VW, VH);
+    text(title, 480, 270, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, 480, 302 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'Chain', chap: 'Chapter 15.4–15.5',
+      formula: 'local_i = T(offset_i) · R(θ_i)\nW₁ = local₁\nW₂ = W₁ · local₂\nW₃ = W₂ · local₃\ntip = W₃ · (68, 0, 1)',
+      used: ['Arms, legs and tails built from joints', 'Turrets, wheels, swords in hands', 'Skeletal animation: one matrix per bone', 'UI widgets nested inside panels'],
+      tryThis: 'Turn only the shoulder: every later frame moves with it, though only θ₁ changed. Then turn only the wrist: the first two frames do not move at all.',
+      over(L, Ws) {
+        axes(Ws[0], 44, 'W₁'); axes(Ws[1], 38, 'W₂'); axes(Ws[2], 32, 'W₃');
+      },
+      live() {
+        const { L, W } = chain(), i = sel, tip = tipWorld(W);
+        const dm = X => matStr(dispM(X), ' ', 8, f2);
+        return `selected: ${LINKS[i].name} (θ = ${f0(deg(theta[i]))}°)\nlocal${i + 1}${settings.rowConv ? ' (rows)' : ''}\n${dm(L[i])}\nW${i + 1}${i ? ' = W' + i + ' · local' + (i + 1) : ''}\n${dm(W[i])}\ntip (68, 0, 1) → ${P1(tip)}\nrotation of W${i + 1}: ${f0(deg(angOf(W[i])))}°\n  = sum of the joint angles`;
+      },
+    },
+    {
+      name: 'Point or direction', chap: 'Chapter 15.2–15.3',
+      formula: 'point      (x, y, 1)  w = 1: moved\ndirection  (x, y, 0)  w = 0: only turned\nW (x, y, w) = A (x, y) + w·t\ntip − joint = W·(68, 0, 0)',
+      used: ['Positions vs velocities and normals', 'Moving a point but only rotating a direction', 'Muzzle position vs muzzle direction', 'Why a 4th coordinate exists in 3D graphics'],
+      tryThis: 'Watch the two numbers in the live box: the point result changes with the hand position, the direction result does not. They only change when the arm turns.',
+      over(L, Ws) {
+        const o = apply(Ws[2], V(0, 0)), tip = apply(Ws[2], TIP), dir = apply(Ws[2], V(68, 0), 0);
+        arrow(o, tip, '#ffb547', 3, 10);
+        text('point, w = 1', tip.x + 10, tip.y - 12, '#ffb547', 12);
+        const d0 = V(60, 60);
+        arrow(d0, V(d0.x + dir.x, d0.y + dir.y), '#c792ea', 3, 10);
+        text('direction, w = 0 (same arrow, no position)', d0.x + 4, d0.y + 24, '#c792ea', 12);
+        circle(o, 4, '#ffb547');
+      },
+      live() {
+        const { W } = chain(), M = W[2];
+        const pt = apply(M, TIP, 1), dr = apply(M, TIP, 0), o = apply(M, V(0, 0), 1);
+        return `W₃ translation column: ${P1(V(M[0][2], M[1][2]))}\n\nw = 1  W·(68, 0, 1) = ${P1(pt)}\nw = 0  W·(68, 0, 0) = ${P1(dr)}\n\nhand origin     ${P1(o)}\ntip − origin    ${P1(sub(pt, o))}\n= the direction ${P1(dr)}`;
+      },
+    },
+    {
+      name: 'Inverse & picking', chap: 'Chapter 15.8',
+      formula: 'W = [ A  t ]   W⁻¹ = [ Aᵀ  −Aᵀt ]\n    [ 0  1 ]        [ 0    1  ]\nmouse in link space: q = W⁻¹ · m\nhit if 0 ≤ qₓ ≤ length, |q_y| ≤ ½ width\nre-parent: local = W_hand⁻¹ · W_crate',
+      used: ['Clicking a rotated unit or button', 'Picking a bone or a sprite under the mouse', 'Picking a 3D object (ray into object space)', 'Attaching an item to a hand without it jumping'],
+      tryThis: 'Click anywhere on a tilted link, then untick "Use the inverse": the click zones are the links as if they were not transformed. Grab a crate with Space and read the local matrix: the crate keeps its pose while its parent changes.',
+      controls: `<label><input type="checkbox" data-set="useInverse"> Pick with W⁻¹ (otherwise W)</label>`,
+      over(L, Ws) {
+        const m = mouse.s, hit = pickLink(m, Ws);
+        for (let i = 0; i < 3; i++) {
+          const p = apply(inv3(Ws[i]), m);
+          const near = i === hit;
+          if (near || len(sub(m, apply(Ws[i], V(0, 0)))) < 260) text(`q${i + 1} ${P1(p)}`, 14, 148 + i * 16, near ? '#ffb547' : '#9aa3b2', 12);
+        }
+        circle(m, 5, null, '#e6e9ef', 1.5);
+        text(hit >= 0 ? `picked: ${LINKS[hit].name}` : 'picked: nothing', m.x + 12, m.y - 10, hit >= 0 ? '#ffb547' : '#9aa3b2', 12);
+        if (hit >= 0) { setM(Ws[hit]); ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+          ctx.strokeRect(-8, -LINKS[hit].w / 2 - 6, (hit === 2 ? 74 : LINKS[hit].len + 8) + 8, LINKS[hit].w + 12); ctx.setLineDash([]); setScreen(); }
+        else if (!settings.useInverse) text('click zones are drawn where the un-turned links would be', 480, 570, '#ff6b6b', 12, 'center');
+      },
+      live() {
+        const { W } = chain(), i = sel, Wi = W[i], Wv = inv3(Wi), chk = mm(Wv, Wi);
+        let out = `W${i + 1}\n${matStr(dispM(Wi), ' ', 8)}\nW${i + 1}⁻¹\n${matStr(dispM(Wv), ' ', 8)}\nW⁻¹·W ≈ identity (${f2(chk[0][0])}, ${f2(chk[1][1])}, ${f2(chk[0][2])}, ${f2(chk[1][2])})\nmouse in link space ${P1(apply(Wv, mouse.s))}`;
+        if (held) out += `\n\nheld crate ${held.id}\nlocal = W₃⁻¹ · W_crate\n${matStr(dispM(held.local), ' ', 8)}`;
+        return out;
+      },
+    },
+    {
+      name: 'Order & convention', chap: 'Chapter 15.6–15.7',
+      formula: 'T·R: turn about the joint (correct)\nR·T: turns the offset too (swings the\n     whole link around the parent origin)\ncolumn convention: translation in column 3\nrow convention:    translation in row 3',
+      used: ['Moving then turning vs turning then moving', 'Matrices pasted from another engine or paper', 'Uploading transforms to a GPU (layout)', 'Debugging "my object orbits the wrong point"'],
+      tryThis: 'Untick "Local = T·R" and move any joint: the arm swings about the screen origin, because each link now rotates its own offset. Tick "Row convention": the numbers transpose but nothing on screen changes.',
+      controls: `<label><input type="checkbox" data-set="trOrder"> Local = T(offset) · R(θ)   (correct)</label>
+        <label><input type="checkbox" data-set="rowConv"> Show the row-vector convention (transpose)</label>`,
+      over(L, Ws) {
+        if (!settings.trOrder) text('R · T: each offset is rotated about the parent origin', 480, 570, '#ff6b6b', 12, 'center');
+        const o = V(0, 0);
+        circle(o, 5, null, '#ff6b6b', 2); text('screen origin', 12, 150, '#9aa3b2', 11);
+      },
+      live() {
+        const { L, W } = chain(), i = sel;
+        const A = L[i], col = matStr(A, ' ', 8), row = matStr(tr(A), ' ', 8);
+        const alt = i === 0 ? (settings.trOrder ? mm(R3(theta[0]), T3(BASE.x, BASE.y)) : mm(T3(BASE.x, BASE.y), R3(theta[0]))) : null;
+        return `local${i + 1} used: ${settings.trOrder ? 'T·R' : 'R·T (bug)'}\ncolumn convention (p′ = M p)\n${col}\nrow convention (p′ = p Mᵀ)\n${row}\n${alt ? `\nother order, link 1: translation = ${P1(V(alt[0][2], alt[1][2]))}\nthis order,  link 1: translation = ${P1(V(A[0][2], A[1][2]))}` : ''}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Bin a crate or two first. Then press 1–4 to see the 3×3 matrices behind every link, the point-versus-direction trick, the inverse used for picking, and what goes wrong when the order is wrong.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      el.checked = settings[key];
+      el.addEventListener('input', () => { settings[key] = el.checked; });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tower Path</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .controls button { background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; cursor: pointer; }
+  .controls select { flex: 1; background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px; font: inherit; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Tower Path</h1>
+    <p class="sub">Drag the anchors and handles to reshape the enemy road. Click empty ground to build a tower. Enemies walk the curve at a constant speed only if you convert distance into the curve parameter t.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Reshape</b> drag anchors (blue) and handles (orange) · <b>Build tower</b> click empty ground (40 gold) ·
+      <b>Next wave now</b> Space · <b>Lenses</b> keys 1–5 · <b>Reset path</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+
+<script>
+(() => {
+  // ---------- Small helpers ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const dot = (a, b) => a.x * b.x + a.y * b.y;
+  const cross = (a, b) => a.x * b.y - a.y * b.x;
+  const lerp = (a, b, t) => V(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => (Math.abs(n) < 0.0005 ? 0 : n).toFixed(3);
+  const vs = (v, f = f0) => `(${f(v.x)}, ${f(v.y)})`;
+  const RAD = Math.PI / 180;
+
+  // ---------- Settings ----------
+  const TOWER_COST = 40, TOWER_RANGE = 125, PATH_CLEAR = 34;
+  const SAMPLES = 48;   // arc-length table samples per segment
+  const settings = {
+    curve: 'bezier',     // 'bezier' (anchors + handles) | 'catmull' (anchors only)
+    tension: 0,          // cardinal tension: 0 = Catmull-Rom, 1 = flat tangents
+    mirror: true,        // dragging one handle moves its twin so the joint stays smooth
+    param: 'arc',        // 'naive' | 'newton' | 'arc'   (pitfall: naive)
+    comb: true,          // curvature comb in the continuity lens
+  };
+
+  // ---------- Canvas ----------
+  const WORLD = { w: 1200, h: 700 };
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- The path: anchors and Bézier handles ----------
+  const DEFAULT_ANCHORS = [V(40, 140), V(260, 90), V(430, 260), V(230, 400), V(420, 560), V(700, 470), V(820, 250), V(1010, 130), V(1160, 360)];
+  let anchors = [], hout = [], hin = [];
+  function smoothHandles() {
+    const n = anchors.length;
+    hout = []; hin = [];
+    for (let i = 0; i < n; i++) {
+      const a = anchors[Math.max(i - 1, 0)], b = anchors[Math.min(i + 1, n - 1)];
+      const k = (i === 0 || i === n - 1) ? 1 / 3 : 1 / 6;
+      const d = mul(sub(b, a), k);
+      hout.push(V(d.x, d.y)); hin.push(V(-d.x, -d.y));
+    }
+  }
+  function resetPath() {
+    anchors = DEFAULT_ANCHORS.map(p => V(p.x, p.y));
+    smoothHandles();
+    // a deliberate corner at anchor 3: its outgoing handle points somewhere else
+    const o = hout[3], c = Math.cos(70 * RAD), s = Math.sin(70 * RAD);
+    hout[3] = V((o.x * c - o.y * s) * 1.3, (o.x * s + o.y * c) * 1.3);
+  }
+  function makeSmooth() {
+    for (let i = 1; i < anchors.length - 1; i++) hin[i] = V(-hout[i].x, -hout[i].y);
+  }
+
+  // Convert whichever curve type is active into cubic Bézier segments [p0, p1, p2, p3].
+  function tangentAt(i) {
+    const n = anchors.length;
+    const a = anchors[Math.max(i - 1, 0)], b = anchors[Math.min(i + 1, n - 1)];
+    const k = (1 - settings.tension) * ((i === 0 || i === n - 1) ? 1 : 0.5);
+    return mul(sub(b, a), k);
+  }
+  let segs = [];
+  function buildSegs() {
+    segs = [];
+    const n = anchors.length;
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = anchors[i], p3 = anchors[i + 1];
+      let p1, p2;
+      if (settings.curve === 'bezier') { p1 = add(p0, hout[i]); p2 = add(p3, hin[i + 1]); }
+      else { p1 = add(p0, mul(tangentAt(i), 1 / 3)); p2 = sub(p3, mul(tangentAt(i + 1), 1 / 3)); }
+      segs.push([p0, p1, p2, p3]);
+    }
+  }
+  const NSEG = () => segs.length;
+  function bez(s, t) {
+    const u = 1 - t, a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    return V(a * s[0].x + b * s[1].x + c * s[2].x + d * s[3].x, a * s[0].y + b * s[1].y + c * s[2].y + d * s[3].y);
+  }
+  function dbez(s, t) {
+    const u = 1 - t, a = 3 * u * u, b = 6 * u * t, c = 3 * t * t;
+    return V(a * (s[1].x - s[0].x) + b * (s[2].x - s[1].x) + c * (s[3].x - s[2].x), a * (s[1].y - s[0].y) + b * (s[2].y - s[1].y) + c * (s[3].y - s[2].y));
+  }
+  function ddbez(s, t) {
+    const u = 1 - t;
+    return V(6 * (u * (s[2].x - 2 * s[1].x + s[0].x) + t * (s[3].x - 2 * s[2].x + s[1].x)), 6 * (u * (s[2].y - 2 * s[1].y + s[0].y) + t * (s[3].y - 2 * s[2].y + s[1].y)));
+  }
+  function split(tau) {
+    const n = NSEG();
+    tau = clamp(tau, 0, n - 1e-9);
+    const i = Math.floor(tau);
+    return { i, t: tau - i, s: segs[i] };
+  }
+  const P = tau => { const q = split(tau); return bez(q.s, q.t); };
+  const D = tau => { const q = split(tau); return dbez(q.s, q.t); };      // dP/dτ  (τ runs 0..n, one unit per segment)
+  const DD = tau => { const q = split(tau); return ddbez(q.s, q.t); };
+  function curvature(tau) { const d = D(tau), dd = DD(tau), l = len(d); return l < 1e-9 ? 0 : cross(d, dd) / (l * l * l); }
+
+  // Arc-length table: cumulative length at each sample of τ.
+  let tauTab = [], sTab = [], total = 0;
+  function buildTable() {
+    tauTab = [0]; sTab = [0];
+    let prev = P(0), acc = 0;
+    const n = NSEG();
+    for (let i = 0; i < n; i++) for (let j = 1; j <= SAMPLES; j++) {
+      const tau = i + j / SAMPLES, p = bez(segs[i], j / SAMPLES);
+      acc += Math.hypot(p.x - prev.x, p.y - prev.y); prev = p;
+      tauTab.push(tau); sTab.push(acc);
+    }
+    total = acc;
+  }
+  function sAtTau(tau) {
+    tau = clamp(tau, 0, NSEG());
+    const f = tau * SAMPLES, i = Math.min(Math.floor(f), tauTab.length - 2), r = f - i;
+    return sTab[i] + (sTab[i + 1] - sTab[i]) * r;
+  }
+  function tauAtS(s) {
+    if (s <= 0) return 0; if (s >= total) return NSEG();
+    let lo = 0, hi = sTab.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (sTab[m] <= s) lo = m; else hi = m; }
+    const r = (s - sTab[lo]) / Math.max(sTab[hi] - sTab[lo], 1e-9);
+    return tauTab[lo] + (tauTab[hi] - tauTab[lo]) * r;
+  }
+  function rebuild() { buildSegs(); buildTable(); }
+
+  // ---------- Game state ----------
+  let enemies = [], towers = [], beams = [], popups = [];
+  let gold = 100, lives = 10, wave = 0, spawnLeft = 0, spawnTimer = 0, waveTimer = 3, kills = 0, clock = 0;
+  let paused = false, mouse = null, drag = null, speedStat = { v: 0, min: 0, max: 0 };
+  let demoTau = 0;
+
+  function resetGame() {
+    enemies = []; towers = []; beams = []; popups = [];
+    gold = 100; lives = 10; wave = 0; spawnLeft = 0; spawnTimer = 0; waveTimer = 3; kills = 0;
+  }
+  function startWave() { wave++; spawnLeft = 10 + wave * 2; spawnTimer = 0; waveTimer = 1e9; }
+  function spawn() {
+    const runner = Math.random() < 0.3;
+    enemies.push({ tau: 0, speed: runner ? 130 : 80, hp: (runner ? 3 : 5) + wave, max: (runner ? 3 : 5) + wave, runner, v: 0, pos: P(0) });
+  }
+  function popup(p, text, color) { popups.push({ x: p.x, y: p.y - 14, text, color, t: 0 }); }
+
+  function advance(e, dt) {
+    const before = e.pos;
+    if (settings.param === 'naive') e.tau += (e.speed / (total / NSEG())) * dt;         // constant rate in t
+    else if (settings.param === 'newton') e.tau += e.speed * dt / Math.max(len(D(e.tau)), 1e-6); // one linearised correction
+    else e.tau = tauAtS(sAtTau(e.tau) + e.speed * dt);                                  // distance → t by table lookup
+    e.pos = P(e.tau);
+    e.v = dt > 0 ? Math.hypot(e.pos.x - before.x, e.pos.y - before.y) / dt : 0;
+  }
+  function update(dt) {
+    clock += dt;
+    demoTau = (clock * 0.45) % NSEG();
+    if (spawnLeft > 0) { spawnTimer -= dt; if (spawnTimer <= 0) { spawn(); spawnLeft--; spawnTimer = 0.9; if (spawnLeft === 0) waveTimer = 7; } }
+    else if (!enemies.length || waveTimer < 1e8) { waveTimer -= dt; if (waveTimer <= 0) startWave(); }
+    for (const e of enemies) advance(e, dt);
+    for (const e of enemies) if (e.tau >= NSEG() - 1e-6) { e.dead = true; lives--; popup(e.pos, '-1 life', '#ff6b6b'); if (lives <= 0) { lives = 10; popup(V(600, 340), 'base rebuilt', '#9aa3b2'); } }
+    // towers shoot the enemy furthest along the road
+    for (const t of towers) {
+      t.cd -= dt;
+      if (t.cd > 0) continue;
+      let best = null;
+      for (const e of enemies) if (!e.dead && Math.hypot(e.pos.x - t.x, e.pos.y - t.y) <= TOWER_RANGE && (!best || e.tau > best.tau)) best = e;
+      if (best) { best.hp--; t.cd = 0.45; beams.push({ a: V(t.x, t.y), b: V(best.pos.x, best.pos.y), t: 0 }); if (best.hp <= 0) { best.dead = true; gold += 6; kills++; popup(best.pos, '+6', '#ffd166'); } }
+    }
+    enemies = enemies.filter(e => !e.dead);
+    for (const b of beams) b.t += dt; beams = beams.filter(b => b.t < 0.12);
+    for (const p of popups) p.t += dt; popups = popups.filter(p => p.t < 1);
+    // speed statistics of the whole crowd (what the player perceives)
+    if (enemies.length) {
+      let mn = 1e9, mx = 0, sum = 0;
+      for (const e of enemies) { const r = e.v / e.speed; mn = Math.min(mn, r); mx = Math.max(mx, r); sum += r; }
+      speedStat = { v: sum / enemies.length, min: mn, max: mx };
+    }
+  }
+
+  // ---------- Input ----------
+  function toWorld(e) {
+    const r = canvas.getBoundingClientRect();
+    return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+  }
+  function pick(p) {
+    const R = 16 / Math.max(S, 0.5) ;
+    let best = null, bd = R;
+    for (let i = 0; i < anchors.length; i++) {
+      let d = Math.hypot(anchors[i].x - p.x, anchors[i].y - p.y);
+      if (d < bd) { bd = d; best = { kind: 'a', i }; }
+      if (settings.curve === 'bezier') {
+        if (i < anchors.length - 1) { const q = add(anchors[i], hout[i]); d = Math.hypot(q.x - p.x, q.y - p.y); if (d < bd) { bd = d; best = { kind: 'o', i }; } }
+        if (i > 0) { const q = add(anchors[i], hin[i]); d = Math.hypot(q.x - p.x, q.y - p.y); if (d < bd) { bd = d; best = { kind: 'i', i }; } }
+      }
+    }
+    return best;
+  }
+  function distToPath(p) {
+    let best = 1e9;
+    const n = NSEG() * 12;
+    for (let i = 0; i <= n; i++) { const q = P(i / 12 * 0.999999); best = Math.min(best, Math.hypot(q.x - p.x, q.y - p.y)); }
+    return best;
+  }
+  function canBuild(p) {
+    if (gold < TOWER_COST) return false;
+    if (p.x < 20 || p.x > WORLD.w - 20 || p.y < 20 || p.y > WORLD.h - 20) return false;
+    if (distToPath(p) < PATH_CLEAR) return false;
+    for (const t of towers) if (Math.hypot(t.x - p.x, t.y - p.y) < 40) return false;
+    for (const a of anchors) if (Math.hypot(a.x - p.x, a.y - p.y) < 24) return false;
+    return true;
+  }
+  canvas.addEventListener('pointerdown', e => {
+    const p = toWorld(e); mouse = p;
+    const h = pick(p);
+    if (h) { drag = h; selAnchor = h.i; canvas.setPointerCapture(e.pointerId); return; }
+    if (canBuild(p)) { towers.push({ x: p.x, y: p.y, cd: 0 }); gold -= TOWER_COST; }
+  });
+  canvas.addEventListener('pointermove', e => {
+    const p = toWorld(e); mouse = p;
+    if (!drag) return;
+    const i = drag.i;
+    p.x = clamp(p.x, 10, WORLD.w - 10); p.y = clamp(p.y, 10, WORLD.h - 10);
+    if (drag.kind === 'a') anchors[i] = V(p.x, p.y);
+    else if (drag.kind === 'o') { hout[i] = sub(p, anchors[i]); if (settings.mirror && i > 0) hin[i] = V(-hout[i].x, -hout[i].y); }
+    else { hin[i] = sub(p, anchors[i]); if (settings.mirror && i < anchors.length - 1) hout[i] = V(-hin[i].x, -hin[i].y); }
+    rebuild();
+  });
+  canvas.addEventListener('pointerup', () => { drag = null; });
+  canvas.addEventListener('pointerleave', () => { mouse = null; });
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if (k === ' ') { e.preventDefault(); if (spawnLeft === 0) startWave(); }
+    if (k === 'r') { resetPath(); rebuild(); resetGame(); }
+    if (k === 'p') paused = !paused;
+  });
+
+  // ---------- Drawing helpers ----------
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, w = 2, dash) {
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.stroke(); ctx.setLineDash([]);
+  }
+  function text(s, x, y, color = '#e6e9ef', size = 13, align = 'left') {
+    ctx.fillStyle = color; ctx.font = `${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`;
+    ctx.textAlign = align; ctx.fillText(s, x, y);
+  }
+  function arrow(from, vec, color, label, w = 3) {
+    const l = len(vec); if (l < 3) return;
+    const to = add(from, vec), ux = vec.x / l, uy = vec.y / l;
+    line(from, to, color, w);
+    ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - ux * 10 - uy * 5, to.y - uy * 10 + ux * 5);
+    ctx.lineTo(to.x - ux * 10 + uy * 5, to.y - uy * 10 - ux * 5); ctx.closePath();
+    ctx.fillStyle = color; ctx.fill();
+    if (label) text(label, to.x + 6, to.y - 6, color, 12);
+  }
+  function polyline(pts, color, w = 2, dash) {
+    if (pts.length < 2) return;
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.stroke(); ctx.setLineDash([]);
+  }
+  function frameBox(x, y, w, h, title) {
+    ctx.fillStyle = 'rgba(15,18,24,.9)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+    text(title, x + 8, y + 16, '#9aa3b2', 11);
+  }
+  function pathPoints(step = 6) {
+    const pts = [], n = NSEG();
+    for (let i = 0; i < n; i++) for (let j = 0; j < step; j++) pts.push(bez(segs[i], j / step));
+    pts.push(bez(segs[n - 1], 1));
+    return pts;
+  }
+  const lensOn = i => LENSES[i] && LENSES[i].on;
+  let selAnchor = 3;
+  function probeTau() {
+    if (enemies.length) return enemies.reduce((a, b) => (b.tau > a.tau ? b : a)).tau;
+    return demoTau;
+  }
+
+  // ---------- Render ----------
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0f1218'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.fillStyle = '#18202c'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    // grass dots
+    ctx.fillStyle = 'rgba(255,255,255,.035)';
+    for (let x = 20; x < WORLD.w; x += 40) for (let y = 20; y < WORLD.h; y += 40) ctx.fillRect(x, y, 2, 2);
+    // road
+    const pts = pathPoints(16);
+    polyline(pts, '#3a3326', 34); polyline(pts, '#5a4f39', 28);
+    polyline(pts, 'rgba(255,255,255,.12)', 1.5, [8, 10]);
+    text('IN', anchors[0].x + 10, anchors[0].y - 14, '#9aa3b2', 12);
+    text('BASE', anchors[anchors.length - 1].x - 30, anchors[anchors.length - 1].y + 28, '#9aa3b2', 12);
+
+    // towers
+    for (const t of towers) {
+      circle(t, TOWER_RANGE, 'rgba(108,184,255,.04)', 'rgba(108,184,255,.15)', 1);
+      circle(t, 12, '#2f6fb3', '#cfe6ff');
+    }
+    for (const b of beams) line(b.a, b.b, 'rgba(255,209,102,.9)', 2);
+    // build preview
+    if (mouse && !drag && !pick(mouse)) {
+      const ok = canBuild(mouse);
+      circle(mouse, 12, ok ? 'rgba(95,209,139,.35)' : 'rgba(255,107,107,.3)', ok ? '#5fd18b' : '#ff6b6b', 1.5);
+    }
+    // enemies, drawn pointing along the tangent
+    for (const e of enemies) {
+      const d = D(e.tau), a = Math.atan2(d.y, d.x);
+      ctx.save(); ctx.translate(e.pos.x, e.pos.y); ctx.rotate(a);
+      ctx.beginPath(); ctx.moveTo(11, 0); ctx.lineTo(-8, 8); ctx.lineTo(-5, 0); ctx.lineTo(-8, -8); ctx.closePath();
+      ctx.fillStyle = e.runner ? '#ff9f43' : '#ff6b6b'; ctx.fill(); ctx.restore();
+      ctx.fillStyle = '#0f1218'; ctx.fillRect(e.pos.x - 10, e.pos.y - 18, 20, 3);
+      ctx.fillStyle = '#5fd18b'; ctx.fillRect(e.pos.x - 10, e.pos.y - 18, 20 * e.hp / e.max, 3);
+    }
+    for (const p of popups) text(p.text, p.x, p.y - p.t * 24, p.color, 13, 'center');
+
+    // editing handles
+    if (settings.curve === 'bezier') {
+      for (let i = 0; i < anchors.length; i++) {
+        if (i < anchors.length - 1) { const q = add(anchors[i], hout[i]); line(anchors[i], q, 'rgba(217,130,43,.6)', 1.5); circle(q, 5, '#d9822b', '#0f1218', 1.5); }
+        if (i > 0) { const q = add(anchors[i], hin[i]); line(anchors[i], q, 'rgba(217,130,43,.6)', 1.5); circle(q, 5, '#d9822b', '#0f1218', 1.5); }
+      }
+    }
+    for (let i = 0; i < anchors.length; i++) { circle(anchors[i], 7, '#6cb8ff', '#0f1218', 2); text(String(i), anchors[i].x + 9, anchors[i].y - 9, '#cfe6ff', 11); }
+
+    // HUD
+    text(`Gold ${gold}`, 40, 38, '#ffd166', 18);
+    text(`Lives ${lives}`, 40, 60, '#ff6b6b', 14);
+    text(`Wave ${wave}  ·  kills ${kills}`, 40, 80, '#9aa3b2', 13);
+    text(spawnLeft > 0 ? `${spawnLeft} enemies still to spawn` : `next wave in ${Math.max(0, Math.ceil(waveTimer > 1e8 ? 0 : waveTimer))} s (Space = now)`, 40, 100, '#9aa3b2', 12);
+    text(`path length ${f0(total)} px  ·  walking: ${settings.param === 'arc' ? 'arc-length' : settings.param === 'newton' ? 'speed-corrected t' : 'naive t'}`, WORLD.w - 40, 30, '#9aa3b2', 12, 'right');
+    if (paused) text('PAUSED', WORLD.w / 2, 330, '#e6e9ef', 30, 'center');
+    for (const l of LENSES) if (l.on) l.draw();
+  }
+
+  // ---------- Lenses ----------
+  const MODE_NAMES = { naive: 'naive: t at a constant rate', newton: 'speed-corrected: Δt = v·Δt / |P′(t)|', arc: 'arc-length table lookup' };
+  const ctrlCurve = `<label>Curve <select data-set="curve"><option value="bezier">Bézier chain (anchors + handles)</option><option value="catmull">Catmull-Rom (anchors only)</option></select></label>`;
+  const ctrlParam = `<label>Enemy movement <select data-set="param"><option value="arc">arc-length table</option><option value="newton">speed-corrected t</option><option value="naive">naive t (constant rate)</option></select></label>`;
+  const LENSES = [
+    {
+      name: 'Bézier curves', chap: 'Chapter 26.1–26.3',
+      formula: 'B(t) = (1−t)³P₀ + 3(1−t)²t P₁\n       + 3(1−t)t² P₂ + t³P₃\nde Casteljau: lerp, lerp, lerp\nB′(t) = 3[(1−t)²(P₁−P₀) + 2(1−t)t(P₂−P₁) + t²(P₃−P₂)]',
+      used: ['Enemy roads and rails in tower defense', 'Camera paths and cutscene moves', 'Vector fonts and shapes', 'UI motion and curved projectile arcs'],
+      tryThis: 'Watch the lead enemy: the three nested lerps (gray → white → yellow) land exactly on the enemy. Drag an orange handle: only the segment it belongs to changes. Move a handle far from its anchor and the curve bulges toward it without ever touching it.',
+      controls: ctrlCurve,
+      draw() {
+        const tau = probeTau(), q = split(tau), s = q.s, t = q.t;
+        polyline([s[0], s[1], s[2], s[3]], 'rgba(230,233,239,.35)', 1.5, [5, 5]);
+        const a = [lerp(s[0], s[1], t), lerp(s[1], s[2], t), lerp(s[2], s[3], t)];
+        const b = [lerp(a[0], a[1], t), lerp(a[1], a[2], t)];
+        const c = lerp(b[0], b[1], t);
+        polyline(a, 'rgba(230,233,239,.6)', 2); polyline(b, '#ffffff', 2.5);
+        for (const p of a) circle(p, 4, '#9aa3b2'); for (const p of b) circle(p, 4.5, '#ffffff');
+        circle(c, 6, '#ffd166', '#0f1218');
+        for (let i = 0; i < 4; i++) text(`P${i}`, s[i].x + 8, s[i].y + 18, '#e6e9ef', 11);
+        text(`segment ${q.i}, t = ${f2(t)}`, c.x + 10, c.y - 12, '#ffd166', 12);
+      },
+      live() {
+        const tau = probeTau(), q = split(tau), t = q.t, u = 1 - t, B = bez(q.s, t), d = dbez(q.s, t);
+        return `segment ${q.i}   t = ${f3(t)}\nweights (1−t)³ = ${f3(u * u * u)}\n        3(1−t)²t = ${f3(3 * u * u * t)}\n        3(1−t)t² = ${f3(3 * u * t * t)}\n        t³ = ${f3(t * t * t)}  (sum 1)\nB(t) = ${vs(B, f1)}\nB′(t) = ${vs(d, f1)}\n|B′(t)| = ${f1(len(d))} per unit t`;
+      },
+    },
+    {
+      name: 'Hermite & Catmull-Rom', chap: 'Chapter 26.4–26.5',
+      formula: 'Hermite: ends P₀,P₃ and tangents m₀,m₃\n  → Bézier handles P₁ = P₀ + m₀/3\n                   P₂ = P₃ − m₃/3\nCatmull-Rom: mᵢ = (1−τ)(Pᵢ₊₁ − Pᵢ₋₁)/2\n(τ = tension; τ = 0 is Catmull-Rom)',
+      used: ['Smooth paths through chosen waypoints', 'Racing lines and camera rails', 'Animation keyframe interpolation', 'Paths designers can edit by moving points only'],
+      tryThis: 'Switch to Catmull-Rom: the handles vanish and the curve passes through every anchor, with each tangent set from its two neighbors. Slide the tension up: tangents shrink, corners tighten and the road gets straight, taut segments.',
+      controls: `${ctrlCurve}<label>Tension τ <input type="range" min="0" max="1" step="0.05" data-set="tension"><span data-show="tension"></span></label>`,
+      draw() {
+        for (let i = 0; i < anchors.length; i++) {
+          let m;
+          if (settings.curve === 'catmull') m = tangentAt(i);
+          else m = i === 0 ? mul(hout[0], 3) : i === anchors.length - 1 ? mul(hin[i], -3) : mul(sub(hout[i], hin[i]), 1.5);
+          arrow(anchors[i], mul(m, 0.5), '#5fd18b', i === selAnchor ? `m${i}` : '', 2.5);
+        }
+        const i = clamp(selAnchor, 0, NSEG() - 1), s = segs[i];
+        polyline(s, 'rgba(255,209,102,.7)', 1.5, [4, 5]);
+        circle(s[1], 4, '#ffd166'); circle(s[2], 4, '#ffd166');
+        text(`segment ${i}: P1 = P0 + m${i}/3,  P2 = P3 − m${i + 1}/3`, 40, 640, '#ffd166', 12);
+      },
+      live() {
+        const i = clamp(selAnchor, 0, anchors.length - 1);
+        const m = settings.curve === 'catmull' ? tangentAt(i) : (i === 0 ? mul(hout[0], 3) : i === anchors.length - 1 ? mul(hin[i], -3) : mul(sub(hout[i], hin[i]), 1.5));
+        const j = clamp(i, 0, NSEG() - 1), s = segs[j];
+        return `curve: ${settings.curve === 'catmull' ? 'Catmull-Rom (τ = ' + f2(settings.tension) + ')' : 'Bézier chain'}\nselected anchor ${i}: ${vs(anchors[i])}\ntangent m${i} = ${vs(m, f1)}\n  → handle offset m/3 = ${vs(mul(m, 1 / 3), f1)}\nsegment ${j}:\n  P0 ${vs(s[0])}  P1 ${vs(s[1])}\n  P2 ${vs(s[2])}  P3 ${vs(s[3])}\n(click or drag an anchor to select it)`;
+      },
+    },
+    {
+      name: 'Continuity', chap: 'Chapter 26.6',
+      formula: 'C⁰: segments meet (always, here)\nG¹: tangent directions match\nC¹: tangent vectors equal (P′ same)\nC²: curvature matches too\nκ = (x′y″ − y′x″) / |P′|³',
+      used: ['Roads and tracks with no sudden steering jerks', 'Cameras on rails (no visible snap)', 'Animation curves that do not pop', 'Any path an object turns to face along'],
+      tryThis: 'Anchor 3 starts with a corner (red): its two handles are not opposite. Press "Make smooth" and the joint turns green. Untick Mirror handles, drag a handle, and watch the joint go from C¹ to merely G¹ (different lengths) or to a corner (different directions).',
+      controls: `${ctrlCurve}<label><input type="checkbox" data-set="mirror"> Mirror handles while dragging</label>
+        <label><input type="checkbox" data-set="comb"> Curvature comb</label>
+        <button data-act="smooth">Make smooth (opposite, equal handles)</button>`,
+      draw() {
+        if (settings.comb) {
+          for (let tau = 0; tau < NSEG(); tau += 0.04) {
+            const p = P(tau), d = D(tau), l = len(d); if (l < 1e-6) continue;
+            const k = curvature(tau), nrm = V(-d.y / l, d.x / l);
+            line(p, add(p, mul(nrm, clamp(k * 1500, -70, 70))), 'rgba(108,184,255,.55)', 1);
+          }
+        }
+        for (let i = 1; i < anchors.length - 1; i++) {
+          const j = jointInfo(i);
+          const col = j.c1 ? '#5fd18b' : j.g1 ? '#ffd166' : '#ff6b6b';
+          circle(anchors[i], 14, null, col, 3);
+          text(j.c1 ? 'C¹' : j.g1 ? 'G¹' : `${f0(j.ang)}° corner`, anchors[i].x + 16, anchors[i].y + 22, col, 12);
+        }
+      },
+      live() {
+        let s = 'joint  angle  |P′| ratio  verdict\n';
+        for (let i = 1; i < anchors.length - 1; i++) {
+          const j = jointInfo(i);
+          s += `${String(i).padStart(3)}   ${f1(j.ang).padStart(5)}°  ${f2(j.ratio).padStart(8)}   ${j.c1 ? 'C¹ smooth' : j.g1 ? 'G¹ only' : 'CORNER'}\n`;
+        }
+        return s + '\nratio = |P′ after| / |P′ before|\nC¹ needs angle 0 and ratio 1.';
+      },
+    },
+    {
+      name: 'Arc length', chap: 'Chapter 26.7',
+      formula: 'L = ∫ |P′(t)| dt   (no closed form)\ntable: s[i] = Σ |P(tᵢ) − P(tᵢ₋₁)|\nmove: s ← s + v·Δt\nthen find t with s(t) = s  (binary search + lerp)\nnaive: speed = |P′(t)| × (dt/ds)',
+      used: ['Enemies and cars at a constant speed on a curve', 'Evenly spaced objects along a road (lamps, coins, trails)', 'Camera rails with steady motion', 'Particle trails and ropes laid along a spline'],
+      tryThis: 'Set Enemy movement to "naive t". Enemies speed up on long stretches, crawl through tight ones and bunch together. Orange ticks (equal t) clump unevenly; blue ticks (equal distance) never do. Switch back to the arc-length table.',
+      controls: ctrlParam,
+      draw() {
+        // ticks: equal-t (orange) and equal-length (blue)
+        for (let tau = 0; tau < NSEG(); tau += 0.25) { const p = P(tau), d = D(tau), l = len(d) || 1; line(add(p, V(-d.y / l * 9, d.x / l * 9)), add(p, V(d.y / l * 9, -d.x / l * 9)), '#d9822b', 2); }
+        for (let s = 0; s < total; s += 40) { const tau = tauAtS(s), p = P(tau), d = D(tau), l = len(d) || 1; circle(p, 3.5, '#6cb8ff'); }
+        // speed graph |P'(τ)|
+        const x = 640, y = 560, w = 540, h = 130;
+        frameBox(x, y, w, h, '|P′(τ)|  = speed if t moved at a constant rate');
+        let mx = 0; const vals = [];
+        for (let i = 0; i <= 200; i++) { const v = len(D(NSEG() * i / 200 * 0.99999)); vals.push(v); mx = Math.max(mx, v); }
+        const pts = vals.map((v, i) => V(x + 14 + (w - 28) * i / 200, y + h - 14 - (h - 44) * v / mx));
+        polyline(pts, '#d9822b', 2);
+        const meanV = total / NSEG(); const my = y + h - 14 - (h - 44) * meanV / mx;
+        line(V(x + 14, my), V(x + w - 14, my), 'rgba(108,184,255,.8)', 1.5, [6, 4]);
+        text('mean', x + w - 50, my - 4, '#6cb8ff', 11);
+        const tau = probeTau(); circle(V(x + 14 + (w - 28) * tau / NSEG(), y + h - 14 - (h - 44) * len(D(tau)) / mx), 4.5, '#ffd166');
+        text(`max ${f0(mx)} , min ${f0(Math.min(...vals))}  (per unit t)`, x + 8, y + h - 3, '#9aa3b2', 10);
+      },
+      live() {
+        const e = enemies.length ? enemies.reduce((a, b) => (b.tau > a.tau ? b : a)) : null;
+        let s = `walking: ${MODE_NAMES[settings.param]}\ntotal length ${f1(total)} px, ${NSEG()} segments\nsegment lengths: ${segLengths().map(f0).join(', ')}\ntable: ${tauTab.length} samples\n\n`;
+        if (e) s += `lead enemy wants ${f0(e.speed)} px/s\n  moves at ${f0(e.v)} px/s (${f2(e.v / e.speed)}×)\nwhole crowd speed ratio:\n  min ${f2(speedStat.min)}  max ${f2(speedStat.max)}`;
+        else s += 'waiting for enemies (Space)';
+        return s;
+      },
+    },
+    {
+      name: 'Tangent & curvature', chap: 'Chapter 26.8',
+      formula: 'T = P′/|P′|   (heading = atan2(T_y, T_x))\nN = (−T_y, T_x)   (left normal in y-up)\nκ = (x′y″ − y′x″)/|P′|³,  R = 1/|κ|\ncentripetal acceleration = v²·κ\nsafe speed = √(a_max·R)',
+      used: ['Facing enemies and vehicles along their path', 'Racing lines and speed limits in corners', 'Offsetting lanes and track edges by the normal', 'Camera banking and look-ahead'],
+      tryThis: 'Watch the circle (the best-fit circle at the lead enemy). In tight bends it shrinks and the safe cornering speed drops; on straights its radius explodes. Pull a handle to make a hairpin and see κ spike.',
+      controls: ctrlCurve,
+      draw() {
+        const tau = probeTau(), p = P(tau), d = D(tau), l = len(d) || 1;
+        const T = V(d.x / l, d.y / l), N = V(-T.y, T.x), k = curvature(tau);
+        arrow(p, mul(T, 50), '#5fd18b', 'T');
+        arrow(p, mul(N, 38), '#ffb547', 'N');
+        if (Math.abs(k) > 1e-4) {
+          const R = 1 / Math.abs(k), c = add(p, mul(N, R * Math.sign(k)));
+          if (R < 600) { ctx.setLineDash([5, 6]); circle(c, R, null, 'rgba(108,184,255,.6)', 1.5); ctx.setLineDash([]); line(p, c, 'rgba(108,184,255,.35)', 1); circle(c, 3, '#6cb8ff'); }
+        }
+        // lane offsets
+        const lane = [];
+        for (let t2 = 0; t2 < NSEG(); t2 += 0.05) { const q = P(t2), dd = D(t2), ll = len(dd) || 1; lane.push(V(q.x - dd.y / ll * 14, q.y + dd.x / ll * 14)); }
+        polyline(lane, 'rgba(255,181,71,.25)', 1.5);
+      },
+      live() {
+        const tau = probeTau(), d = D(tau), l = len(d), k = curvature(tau), R = Math.abs(k) > 1e-6 ? 1 / Math.abs(k) : Infinity;
+        const aMax = 180000 * 0 + 300;
+        return `t-param τ = ${f3(tau)}\nP′ = ${vs(d, f1)},  |P′| = ${f1(l)}\nheading = ${f1(Math.atan2(d.y, d.x) / RAD)}° (y-down screen)\nκ = ${(k).toFixed(5)} per px\nradius R = ${isFinite(R) ? f0(R) + ' px' : 'straight'}\n\nspeed 80 px/s: v²κ = ${f1(80 * 80 * Math.abs(k))} px/s²\nsafe speed (a_max = ${aMax}) = ${isFinite(R) ? f0(Math.sqrt(aMax * R)) : '∞'} px/s`;
+      },
+    },
+  ];
+  function segLengths() { const out = []; for (let i = 0; i < NSEG(); i++) out.push(sTab[(i + 1) * SAMPLES] - sTab[i * SAMPLES]); return out; }
+  function jointInfo(i) {
+    const a = dbez(segs[i - 1], 1), b = dbez(segs[i], 0);
+    const la = len(a), lb = len(b);
+    const ang = Math.abs(Math.atan2(cross(a, b), dot(a, b))) / RAD;
+    const ratio = lb / Math.max(la, 1e-9);
+    return { ang, ratio, g1: ang < 0.5, c1: ang < 0.5 && Math.abs(ratio - 1) < 0.01 };
+  }
+  for (const l of LENSES) l.on = false;
+  const actions = {
+    smooth() { if (settings.curve === 'bezier') { for (let i = 1; i < anchors.length - 1; i++) { const m = lerp(hout[i], V(-hin[i].x, -hin[i].y), 0.5); hout[i] = V(m.x, m.y); hin[i] = V(-m.x, -m.y); } rebuild(); } else resetNote(); },
+  };
+  function resetNote() { popup(V(600, 300), 'switch to Bézier chain to edit handles', '#9aa3b2'); }
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Build a few towers and watch a wave. Then press 1–5 to see the curve math behind the road.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        if (el.type === 'checkbox') settings[key] = el.checked;
+        else if (el.tagName === 'SELECT') settings[key] = el.value;
+        else settings[key] = parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+        rebuild();
+        if (el.tagName === 'SELECT') el.blur();
+      });
+    });
+    cardEl.querySelectorAll('[data-act]').forEach(el => el.addEventListener('click', () => actions[el.dataset.act]()));
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  resetPath(); rebuild(); resetGame();
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (!paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+  window.__tp = { settings, anchors: () => anchors, segs: () => segs, total: () => total, P, D, DD, curvature, tauAtS, sAtTau, rebuild, update, get enemies() { return enemies; }, startWave, jointInfo, segLengths, spawn, resetPath, hout: () => hout, hin: () => hin };
+})();
+</script>
+</body>
+</html>

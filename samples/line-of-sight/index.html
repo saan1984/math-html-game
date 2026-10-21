@@ -1,0 +1,963 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Line of Sight</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Line of Sight</h1>
+    <p class="sub">Steal three intel disks and slip out. Guards see you only if a ray reaches you, and your shots are rays too.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Aim</b> mouse · <b>Fire</b> click or Space ·
+      <b>Lenses</b> keys 1–6 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dot = (a, b) => a.x * b.x + a.y * b.y;
+  const cross = (a, b) => a.x * b.y - a.y * b.x;          // 2D cross (perp-dot), Chapter 13
+  const dist = (a, b) => len(sub(a, b));
+  const fromAngle = (t, r = 1) => V(Math.cos(t) * r, Math.sin(t) * r);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const vs = (v, f = f0) => `(${f(v.x)}, ${f(v.y)})`;
+  const angleDiff = (a, b) => Math.atan2(Math.sin(b - a), Math.cos(b - a));
+
+  const settings = {
+    exact: true,     // exact ray casts; off = sample every N px (the pitfall)
+    step: 12,        // sample spacing N when not exact
+    sat: true,       // SAT against the real rotated walls; off = their bounding boxes
+  };
+  const PLAYER_SPEED = 170;
+  const PLAYER_HALF = 12;         // the player is a 24 × 24 box
+  const GUARD_R = 14;
+  const RANGE = 340;
+  const FOV = 100;                // degrees, full cone
+  const COS_HALF = Math.cos(FOV / 2 * Math.PI / 180);   // cos 50° ≈ 0.643
+  const GUARD_SPEED = 60;
+  const GUARD_BULLET = 1100;      // px/s
+  const SHOT_RANGE = 900;
+  const SHOT_COOLDOWN = 0.3;
+  const THIN = 4;                 // thickness of the thin steel partitions
+  const INTEL_R = 10;
+  const NOISE_R = 260;
+  const TELEGRAPH = 0.45;
+  const FIRE_CD = 1.2;
+
+  // ---------- Level ----------
+  const WORLD = { w: 1200, h: 760 };
+  function box(x0, y0, x1, y1) {
+    return makeWall('box', V((x0 + x1) / 2, (y0 + y1) / 2), (x1 - x0) / 2, (y1 - y0) / 2, 0);
+  }
+  function obb(cx, cy, hx, hy, deg) { return makeWall('obb', V(cx, cy), hx, hy, deg * Math.PI / 180); }
+  function thin(ax, ay, bx, by) {
+    const a = V(ax, ay), b = V(bx, by), d = sub(b, a);
+    const w = makeWall('thin', mul(add(a, b), 0.5), len(d) / 2, THIN / 2, Math.atan2(d.y, d.x));
+    w.a = a; w.b = b; return w;
+  }
+  function makeWall(kind, c, hx, hy, ang) {
+    const u = fromAngle(ang), v = V(-u.y, u.x);
+    const ex = hx * Math.abs(u.x) + hy * Math.abs(v.x), ey = hx * Math.abs(u.y) + hy * Math.abs(v.y);
+    return { kind, c, hx, hy, ang, u, v, min: V(c.x - ex, c.y - ey), max: V(c.x + ex, c.y + ey) };
+  }
+  const walls = [
+    box(0, 0, 1200, 20), box(0, 740, 1200, 760), box(0, 0, 20, 760), box(1180, 0, 1200, 760),
+    box(300, 20, 320, 300), box(300, 420, 320, 740),
+    box(560, 200, 760, 220), box(880, 20, 900, 260), box(880, 380, 900, 620),
+    box(470, 560, 530, 620), box(980, 230, 1180, 250),
+    obb(170, 470, 80, 12, -30), obb(650, 130, 70, 10, 25), obb(1060, 340, 90, 12, 20), obb(720, 600, 36, 36, 45),
+    thin(420, 100, 420, 300), thin(600, 420, 820, 420), thin(980, 500, 1120, 500), thin(20, 260, 200, 260),
+  ];
+  const EXIT = [V(1040, 40), V(1170, 40), V(1170, 150), V(1110, 190), V(1040, 140)];
+  const START = V(60, 700);
+  const INTEL = [V(90, 90), V(650, 300), V(1120, 700)];
+  const ROUTES = [
+    [V(70, 170), V(260, 170)], [V(265, 640), V(265, 330)], [V(360, 50), V(840, 50)],
+    [V(360, 490), V(840, 490)], [V(940, 290), V(940, 700)], [V(1000, 640), V(1150, 640)],
+  ];
+
+  // ---------- Intersection tests (this chapter) ----------
+  // Point in a (possibly rotated) box: move into the box's own axes, then compare.
+  function toLocal(p, w) { const q = sub(p, w.c); return V(dot(q, w.u), dot(q, w.v)); }
+  function pointInWall(p, w) { const l = toLocal(p, w); return Math.abs(l.x) <= w.hx && Math.abs(l.y) <= w.hy; }
+  // Point in a convex polygon: every edge cross product has the same sign.
+  function polyCrosses(p, poly) {
+    return poly.map((a, i) => { const b = poly[(i + 1) % poly.length]; return cross(sub(b, a), sub(p, a)); });
+  }
+  function pointInConvex(p, poly) {
+    const c = polyCrosses(p, poly);
+    return c.every(x => x >= 0) || c.every(x => x <= 0);
+  }
+  // Ray vs axis-aligned box: the slab method.
+  function rayBox(o, d, mn, mx) {
+    let tx1 = -Infinity, tx2 = Infinity, ty1 = -Infinity, ty2 = Infinity;
+    if (d.x !== 0) { const a = (mn.x - o.x) / d.x, b = (mx.x - o.x) / d.x; tx1 = Math.min(a, b); tx2 = Math.max(a, b); }
+    else if (o.x < mn.x || o.x > mx.x) return null;
+    if (d.y !== 0) { const a = (mn.y - o.y) / d.y, b = (mx.y - o.y) / d.y; ty1 = Math.min(a, b); ty2 = Math.max(a, b); }
+    else if (o.y < mn.y || o.y > mx.y) return null;
+    const tNear = Math.max(tx1, ty1), tFar = Math.min(tx2, ty2);
+    if (tNear > tFar || tFar < 0) return null;
+    return { tNear, tFar, tx1, tx2, ty1, ty2 };
+  }
+  // Ray vs rotated box: write the ray in the box's axes, then use the slab method.
+  function rayOBB(o, d, w) {
+    return rayBox(toLocal(o, w), V(dot(d, w.u), dot(d, w.v)), V(-w.hx, -w.hy), V(w.hx, w.hy));
+  }
+  // Ray vs segment: o + t·d = a + u·e, solved with 2D cross products.
+  function raySeg(o, d, a, b) {
+    const e = sub(b, a), den = cross(d, e);
+    if (Math.abs(den) < 1e-9) return null;                 // parallel
+    const w = sub(a, o);
+    const t = cross(w, e) / den, u = cross(w, d) / den;
+    return u >= 0 && u <= 1 ? { t, u, den } : null;
+  }
+  // Ray vs circle: |o + t·d̂ − c|² = r²  →  t² + 2bt + c = 0
+  function rayCircle(o, dh, c, r) {
+    const m = sub(o, c), b = dot(m, dh), cc = dot(m, m) - r * r, disc = b * b - cc;
+    if (disc < 0) return { hit: false, b, cc, disc };
+    const s = Math.sqrt(disc);
+    return { hit: true, b, cc, disc, t1: -b - s, t2: -b + s };
+  }
+  // Nearest wall along o + t·d with 0 ≤ t ≤ tMax
+  function castWalls(o, d, tMax) {
+    let best = null;
+    for (const w of walls) {
+      let t = null, info = null;
+      if (w.kind === 'thin') { info = raySeg(o, d, w.a, w.b); if (info && info.t >= 0) t = info.t; }
+      else {
+        info = w.kind === 'box' ? rayBox(o, d, w.min, w.max) : rayOBB(o, d, w);
+        if (info) t = Math.max(0, info.tNear);
+      }
+      if (t !== null && t <= tMax && (!best || t < best.t)) best = { t, w, info };
+    }
+    return best;
+  }
+  function insideAnyWall(p) { for (const w of walls) if (pointInWall(p, w)) return w; return null; }
+  // The pitfall: walk along the path and test points every N px
+  function sampleWalls(o, d, tMax) {
+    const L = len(d) * tMax, n = Math.max(1, Math.ceil(L / settings.step));
+    for (let i = 1; i <= n; i++) {
+      const t = tMax * i / n, w = insideAnyWall(add(o, mul(d, t)));
+      if (w) return { t, w };
+    }
+    return null;
+  }
+  // Separating axis theorem for two boxes (each with center c, half sizes hx, hy, axes u, v)
+  function sat(A, B) {
+    const axes = [A.u, A.v, B.u, B.v], out = [];
+    let best = null;
+    for (const n of axes) {
+      const dd = dot(sub(B.c, A.c), n);
+      const rA = A.hx * Math.abs(dot(A.u, n)) + A.hy * Math.abs(dot(A.v, n));
+      const rB = B.hx * Math.abs(dot(B.u, n)) + B.hy * Math.abs(dot(B.v, n));
+      const ov = rA + rB - Math.abs(dd);
+      const ax = { n, dd, rA, rB, ov };
+      out.push(ax);
+      if (!best || ov < best.ov) best = ax;
+    }
+    return { axes: out, best, hit: best.ov > 0 };
+  }
+  const aabbOverlap = (a0, a1, b0, b1) => a0.x <= b1.x && b0.x <= a1.x && a0.y <= b1.y && b0.y <= a1.y;
+  function boundsOf(w) { return makeWall('box', w.c, (w.max.x - w.min.x) / 2, (w.max.y - w.min.y) / 2, 0); }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  let mouse = V(600, 380), mouseSeen = false;
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-6]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) { started = true; keys[k] = true; return; }
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === ' ' && !state.over && !paused) shoot();
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  function toWorld(e) {
+    const r = canvas.getBoundingClientRect();
+    return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+  }
+  canvas.addEventListener('pointermove', e => { mouse = toWorld(e); mouseSeen = true; });
+  canvas.addEventListener('pointerdown', e => {
+    mouse = toWorld(e); mouseSeen = true;
+    if (!started) { started = true; return; }
+    if (state.over) { reset(); return; }
+    if (!paused) shoot();
+  });
+
+  // ---------- State ----------
+  let state, player, guards, shots, bullets, popups, intel;
+  let started = false, paused = false;
+
+  function makeGuard(points) {
+    const p0 = points[0];
+    return { pos: V(p0.x, p0.y), points, i: 1, dir: 1, mode: 'patrol',
+      facing: Math.atan2(points[1].y - p0.y, points[1].x - p0.x), lookT: 0, lookBase: 0,
+      meter: 0, alert: false, lost: 0, cd: 0, tele: 0, aimDir: V(1, 0), hp: 2, dead: false,
+      seen: false, inCone: false, inRange: false, dotVal: 0, distTo: 0, sight: null, noise: null, invT: 0 };
+  }
+  function makePlayerBox(c, ang) {
+    const u = fromAngle(ang);
+    return { c, hx: PLAYER_HALF, hy: PLAYER_HALF, ang, u, v: V(-u.y, u.x) };
+  }
+  function reset() {
+    state = { over: null, time: 0, downed: 0, spotted: 0, hits: 0 };
+    player = { box: makePlayerBox(V(START.x, START.y), -Math.PI / 4), hearts: 3, hurt: 0, cd: 0, contact: null };
+    guards = ROUTES.map(makeGuard);
+    intel = INTEL.map(p => ({ pos: V(p.x, p.y), taken: false, t: Math.random() * 6 }));
+    shots = []; bullets = []; popups = [];
+  }
+  reset();
+
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.4 }); }
+
+  // ---------- Player shots: rays ----------
+  let lastShot = null;
+  function aimDir() {
+    const d = sub(mouse, player.box.c);
+    return len(d) > 1 ? norm(d) : player.box.u;
+  }
+  function traceShot(o, dh) {
+    if (settings.exact) {
+      const wh = castWalls(o, dh, SHOT_RANGE);
+      let tEnd = wh ? wh.t : SHOT_RANGE, target = null, circ = null;
+      for (const g of guards) {
+        if (g.dead) continue;
+        const rc = rayCircle(o, dh, g.pos, GUARD_R);
+        if (!rc.hit || rc.t2 < 0) continue;
+        const t = Math.max(0, rc.t1);
+        if (t < tEnd) { tEnd = t; target = g; circ = rc; }
+      }
+      return { o, dh, tEnd, target, circ, wall: target ? null : wh };
+    }
+    // sampled: step N px at a time and test points
+    const n = Math.ceil(SHOT_RANGE / settings.step);
+    for (let i = 1; i <= n; i++) {
+      const t = Math.min(SHOT_RANGE, i * settings.step), p = add(o, mul(dh, t));
+      for (const g of guards) if (!g.dead && dist(p, g.pos) <= GUARD_R) return { o, dh, tEnd: t, target: g, sampled: true };
+      const w = insideAnyWall(p);
+      if (w) return { o, dh, tEnd: t, target: null, wall: { t, w }, sampled: true };
+    }
+    return { o, dh, tEnd: SHOT_RANGE, target: null, sampled: true };
+  }
+  function shoot() {
+    if (player.cd > 0 || state.over) return;
+    player.cd = SHOT_COOLDOWN;
+    const dh = aimDir(), o = add(player.box.c, mul(dh, PLAYER_HALF + 2));
+    const s = traceShot(o, dh);
+    shots.push({ a: o, b: add(o, mul(dh, s.tEnd)), life: 0.14 });
+    lastShot = s;
+    if (s.target) {
+      const g = s.target;
+      g.hp -= g.alert ? 1 : 2;                       // unaware guards drop in one shot
+      if (g.hp <= 0) { g.dead = true; state.downed++; popup(V(g.pos.x, g.pos.y - 24), 'down', '#5fd18b'); }
+      else popup(V(g.pos.x, g.pos.y - 24), 'hit', '#ffb547');
+    }
+    // Gunshots are loud: nearby guards turn to look
+    for (const g of guards) {
+      if (g.dead || g.alert || dist(g.pos, player.box.c) > NOISE_R) continue;
+      g.mode = 'investigate'; g.noise = V(player.box.c.x, player.box.c.y); g.invT = 2.5;
+      g.meter = Math.min(0.95, g.meter + 0.2);
+    }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 22 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    for (const s of shots) s.life -= dt;
+    shots = shots.filter(s => s.life > 0);
+    if (state.over) return;
+    state.time += dt;
+    player.cd -= dt; player.hurt -= dt;
+
+    // Move, turn toward the mouse, then push out of walls with SAT
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    const v = mul(norm(V(ix, iy)), PLAYER_SPEED);
+    // Substeps of at most 8 px, so the player can never jump through a thin wall (section 22.8)
+    const subs = Math.max(1, Math.ceil(PLAYER_SPEED * dt / 8));
+    let pb = player.box;
+    player.contact = null;
+    for (let st = 0; st < subs; st++) {
+      const c = add(pb.c, mul(v, dt / subs));
+      const ang = mouseSeen ? Math.atan2(mouse.y - c.y, mouse.x - c.x) : pb.ang;
+      pb = makePlayerBox(c, ang);
+      for (let k = 0; k < 3; k++) {
+        for (const w0 of walls) {
+          const w = settings.sat ? w0 : boundsOf(w0);
+          const e = PLAYER_HALF * Math.SQRT2;
+          if (!aabbOverlap(V(pb.c.x - e, pb.c.y - e), V(pb.c.x + e, pb.c.y + e), w.min, w.max)) continue;  // broad phase
+          const r = sat(pb, w);
+          if (!r.hit) continue;
+          const push = mul(r.best.n, r.best.dd > 0 ? -r.best.ov : r.best.ov);
+          pb = makePlayerBox(add(pb.c, push), ang);
+          if (!player.contact) player.contact = { w: w0, push };
+        }
+      }
+    }
+    player.box = pb;
+
+    // Intel disks: circle vs (rotated) box — clamp in the box's own axes
+    for (const it of intel) {
+      if (it.taken) continue;
+      it.t += dt;
+      const l = toLocal(it.pos, pb);
+      const q = V(clamp(l.x, -pb.hx, pb.hx), clamp(l.y, -pb.hy, pb.hy));
+      if (dist(l, q) <= INTEL_R) {
+        it.taken = true;
+        const n = intel.filter(x => x.taken).length;
+        popup(V(it.pos.x, it.pos.y - 18), n === 3 ? 'all intel: go to EXIT' : `intel ${n}/3`, '#b48cff');
+      }
+    }
+    if (intel.every(x => x.taken) && pointInConvex(pb.c, EXIT)) state.over = 'escaped';
+
+    // Guards
+    for (const g of guards) {
+      if (g.dead) continue;
+      const toP = sub(pb.c, g.pos);
+      g.distTo = len(toP);
+      const f = fromAngle(g.facing), dh = norm(toP);
+      g.dotVal = dot(f, dh);
+      g.inCone = g.dotVal >= COS_HALF;
+      g.inRange = g.distTo <= RANGE;
+      g.sight = g.inRange ? (settings.exact ? castWalls(g.pos, toP, 1) : sampleWalls(g.pos, toP, 1)) : null;
+      g.clear = g.inRange && !g.sight;
+      g.seen = g.inCone && g.clear;
+
+      if (g.alert) {
+        turnToward(g, Math.atan2(toP.y, toP.x), 4 * dt);
+        if (g.seen) g.lost = 0; else g.lost += dt;
+        if (g.lost > 2.5) { g.alert = false; g.meter = 0.6; g.mode = 'patrol'; }
+        g.cd -= dt;
+        if (g.cd <= 0 && g.seen && g.tele <= 0) { g.tele = TELEGRAPH; g.aimDir = dh; }
+      } else {
+        if (g.seen) {
+          const rate = 0.7 + 1.5 * (1 - g.distTo / RANGE);
+          g.meter += rate * dt;
+          if (g.meter >= 1) {
+            g.meter = 1; g.alert = true; g.lost = 0; g.cd = 0.3; g.hp = Math.max(g.hp, 2); state.spotted++;
+            popup(V(g.pos.x, g.pos.y - 26), '!', '#ff6b6b');
+          }
+        } else g.meter = Math.max(0, g.meter - 0.3 * dt);
+
+        if (g.seen && g.meter > 0.4) turnToward(g, Math.atan2(toP.y, toP.x), 2 * dt);   // suspicious: stop and stare
+        else if (g.mode === 'investigate') {
+          g.invT -= dt;
+          turnToward(g, Math.atan2(g.noise.y - g.pos.y, g.noise.x - g.pos.x), 3 * dt);
+          if (g.invT <= 0) g.mode = 'patrol';
+        } else if (g.mode === 'look') {
+          g.lookT += dt;
+          g.facing = g.lookBase + 0.8 * Math.sin(g.lookT / 1.4 * Math.PI * 2);
+          if (g.lookT >= 1.4) { g.facing = g.lookBase; g.mode = 'patrol'; }
+        } else {
+          const target = g.points[g.i], to = sub(target, g.pos);
+          if (len(to) < 2) {
+            g.pos = V(target.x, target.y);
+            if (g.i + g.dir < 0 || g.i + g.dir >= g.points.length) g.dir *= -1;
+            g.i += g.dir;
+            g.mode = 'look'; g.lookT = 0; g.lookBase = g.facing;
+          } else {
+            g.pos = add(g.pos, mul(norm(to), Math.min(len(to), GUARD_SPEED * dt)));
+            turnToward(g, Math.atan2(to.y, to.x), 4 * dt);
+          }
+        }
+      }
+      if (g.tele > 0) {
+        g.tele -= dt;
+        if (g.tele <= 0) {
+          bullets.push({ pos: add(g.pos, mul(g.aimDir, GUARD_R + 4)), vel: mul(g.aimDir, GUARD_BULLET), life: 1.2, step: 0, prev: null });
+          g.cd = FIRE_CD;
+        }
+      }
+    }
+
+    // Guard bullets: swept segment per frame (exact) or a point test at the new position (pitfall)
+    for (const b of bullets) {
+      const d = mul(b.vel, dt), p1 = add(b.pos, d);
+      b.prev = b.pos; b.step = len(d);
+      let hitPlayer = false, stop = false;
+      if (settings.exact) {
+        const wh = castWalls(b.pos, d, 1);
+        const ph = rayOBB(b.pos, d, pb);
+        const tp = ph ? Math.max(0, ph.tNear) : Infinity;
+        if (tp <= 1 && (!wh || tp <= wh.t)) hitPlayer = true;
+        else if (wh) { stop = true; b.pos = add(b.pos, mul(d, wh.t)); }
+      } else {
+        if (pointInWall(p1, pb)) hitPlayer = true;
+        else if (insideAnyWall(p1)) stop = true;
+      }
+      if (!stop && !hitPlayer) b.pos = p1;
+      b.life -= dt;
+      if (stop) b.life = 0;
+      if (hitPlayer) {
+        b.life = 0;
+        if (player.hurt <= 0) {
+          player.hearts--; player.hurt = 1.2; state.hits++;
+          popup(V(pb.c.x, pb.c.y - 26), 'HIT', '#ff6b6b');
+          if (player.hearts <= 0) state.over = 'caught';
+        }
+      }
+    }
+    bullets = bullets.filter(b => b.life > 0 && b.pos.x > 0 && b.pos.y > 0 && b.pos.x < WORLD.w && b.pos.y < WORLD.h);
+    if (guards.every(g => g.dead) && !state.allDown) { state.allDown = true; popup(V(600, 380), 'all guards down', '#5fd18b'); }
+  }
+  function turnToward(g, target, maxStep) { g.facing += clamp(angleDiff(g.facing, target), -maxStep, maxStep); }
+
+  // ---------- Drawing ----------
+  function arrow(from, vec, color, label, lw = 2.5) {
+    const to = add(from, vec);
+    if (len(vec) < 2) return;
+    const a = Math.atan2(vec.y, vec.x);
+    ctx.strokeStyle = ctx.fillStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * 10, to.y - Math.sin(a - .4) * 10);
+    ctx.lineTo(to.x - Math.cos(a + .4) * 10, to.y - Math.sin(a + .4) * 10);
+    ctx.closePath(); ctx.fill();
+    if (label) text(label, to.x + 6, to.y - 6, color, 13);
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 1.5, dash) {
+    if (dash) ctx.setLineDash(dash);
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    if (dash) ctx.setLineDash([]);
+  }
+  function corners(w) {
+    const U = mul(w.u, w.hx), Vv = mul(w.v, w.hy);
+    return [add(add(w.c, U), Vv), add(sub(w.c, U), Vv), sub(sub(w.c, U), Vv), sub(add(w.c, U), Vv)];
+  }
+  function pathPoly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath(); }
+
+  function sightLength(o, dir) {
+    const d = mul(dir, RANGE);
+    const h = settings.exact ? castWalls(o, d, 1) : sampleWalls(o, d, 1);
+    return h ? h.t * RANGE : RANGE;
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, WORLD.h); }
+    for (let y = 0; y <= WORLD.h; y += 40) { ctx.moveTo(0, y); ctx.lineTo(WORLD.w, y); }
+    ctx.stroke();
+
+    // Exit (a convex polygon)
+    const ready = intel.every(x => x.taken);
+    pathPoly(EXIT);
+    ctx.fillStyle = ready ? 'rgba(95,209,139,.22)' : 'rgba(95,209,139,.07)'; ctx.fill();
+    ctx.strokeStyle = ready ? '#5fd18b' : '#2f5e45'; ctx.lineWidth = 2; ctx.stroke();
+    text('EXIT', 1105, 105, ready ? '#5fd18b' : '#3f7a5a', 14, 'center');
+    if (!ready) text('need 3 intel', 1105, 124, '#3f7a5a', 11, 'center');
+
+    // Vision cones, cast ray by ray so they stop at walls
+    const half = FOV / 2 * Math.PI / 180;
+    for (const g of guards) {
+      if (g.dead) continue;
+      ctx.beginPath(); ctx.moveTo(g.pos.x, g.pos.y);
+      const rays = 40;
+      for (let i = 0; i <= rays; i++) {
+        const dir = fromAngle(g.facing - half + 2 * half * i / rays);
+        const p = add(g.pos, mul(dir, sightLength(g.pos, dir)));
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      const a = 0.07 + g.meter * 0.16;
+      ctx.fillStyle = g.alert ? `rgba(255,107,107,${a + 0.06})` : g.seen ? `rgba(255,140,90,${a + 0.04})` : `rgba(255,181,71,${a})`;
+      ctx.fill();
+    }
+
+    // Walls
+    ctx.fillStyle = '#2b3242';
+    for (const w of walls) {
+      if (w.kind === 'box') ctx.fillRect(w.min.x, w.min.y, w.max.x - w.min.x, w.max.y - w.min.y);
+      else if (w.kind === 'obb') { pathPoly(corners(w)); ctx.fill(); ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 1; ctx.stroke(); }
+      else { pathPoly(corners(w)); ctx.fillStyle = '#56607a'; ctx.fill(); ctx.fillStyle = '#2b3242'; }
+    }
+
+    // Intel disks
+    for (const it of intel) {
+      if (it.taken) continue;
+      const p = V(it.pos.x, it.pos.y + Math.sin(it.t * 3) * 2);
+      circle(p, INTEL_R, '#2c2350', '#b48cff', 3);
+      circle(p, 3, '#b48cff');
+    }
+
+    // Shots and guard bullets
+    for (const s of shots) { ctx.globalAlpha = clamp(s.life / 0.14, 0, 1); line(s.a, s.b, '#ffe08a', 2.5); ctx.globalAlpha = 1; }
+    for (const g of guards) {
+      if (g.dead || g.tele <= 0) continue;
+      const h = castWalls(g.pos, mul(g.aimDir, 2000), 1);
+      line(g.pos, add(g.pos, mul(g.aimDir, h ? h.t * 2000 : 2000)), 'rgba(255,107,107,.55)', 1.2, [6, 5]);
+    }
+    for (const b of bullets) {
+      const tail = sub(b.pos, mul(norm(b.vel), 16));
+      line(tail, b.pos, '#ff6b6b', 3);
+    }
+
+    // Guards
+    for (const g of guards) {
+      if (g.dead) { circle(g.pos, GUARD_R, '#22262f', '#4a5162'); text('×', g.pos.x, g.pos.y + 5, '#6b7385', 16, 'center'); continue; }
+      circle(g.pos, GUARD_R, '#3b2a20', g.alert ? '#ff6b6b' : '#ffb547', 3);
+      const tip = add(g.pos, fromAngle(g.facing, GUARD_R + 7));
+      line(g.pos, tip, '#ffb547', 4);
+      if (g.meter > 0.01) {
+        ctx.fillStyle = '#1f2430'; ctx.fillRect(g.pos.x - 18, g.pos.y - GUARD_R - 12, 36, 5);
+        ctx.fillStyle = g.alert ? '#ff6b6b' : '#ffb547';
+        ctx.fillRect(g.pos.x - 18, g.pos.y - GUARD_R - 12, 36 * g.meter, 5);
+      }
+      if (g.alert) text('!', g.pos.x + 20, g.pos.y - GUARD_R - 4, '#ff6b6b', 15);
+      else if (g.mode === 'investigate') text('?', g.pos.x + 20, g.pos.y - GUARD_R - 4, '#ffb547', 14);
+    }
+
+    // Player: a rotated 24 × 24 box
+    const pb = player.box;
+    const blink = player.hurt > 0 && Math.floor(player.hurt * 12) % 2 === 0;
+    if (!blink) {
+      pathPoly(corners(pb)); ctx.fillStyle = '#2a5d8f'; ctx.fill();
+      ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 2.5; ctx.stroke();
+      line(pb.c, add(pb.c, mul(pb.u, PLAYER_HALF + 6)), '#cfe6ff', 3);
+    }
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    text(`${'♥'.repeat(Math.max(0, player.hearts))}${'♡'.repeat(3 - Math.max(0, player.hearts))}`, 30, 16, '#ff6b6b', 15);
+    text(`intel ${intel.filter(x => x.taken).length}/3   guards down ${state.downed}/6   spotted ${state.spotted}   time ${state.time.toFixed(1)}s   ray casts: ${settings.exact ? 'exact' : `sampled every ${settings.step} px`}`,
+      110, 15, '#9aa3b2', 13);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('LINE OF SIGHT', ['Steal the 3 purple intel disks, then reach the EXIT', 'WASD to move · mouse to aim · click or Space to fire', 'Guards only see you if a ray reaches you. Unaware guards drop in one shot.', 'Press any key to start']);
+    else if (state.over === 'caught') overlay('CAUGHT', [`${state.time.toFixed(1)} s · intel ${intel.filter(x => x.taken).length}/3 · ${state.downed} guards down`, 'Press R or click to try again']);
+    else if (state.over === 'escaped') overlay('ESCAPED', [`${state.time.toFixed(1)} s · spotted ${state.spotted}× · ${state.downed} guards down · ${3 - player.hearts} hits taken`, state.spotted === 0 ? 'Ghost run: never spotted!' : 'Try for a ghost run: never spotted', 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  function nearestGuard() {
+    let best = null, bd = Infinity;
+    for (const g of guards) if (!g.dead && g.distTo < bd) { bd = g.distTo; best = g; }
+    return best;
+  }
+  const kindName = w => w.kind === 'box' ? 'box wall' : w.kind === 'obb' ? 'rotated wall' : 'thin wall';
+  function pick(p) {
+    for (const g of guards) if (!g.dead) { const d = sub(p, g.pos); if (dot(d, d) <= GUARD_R * GUARD_R) return { kind: 'guard', g, d2: dot(d, d) }; }
+    for (const it of intel) if (!it.taken) { const d = sub(p, it.pos); if (dot(d, d) <= INTEL_R * INTEL_R) return { kind: 'intel', d2: dot(d, d) }; }
+    if (pointInWall(p, player.box)) return { kind: 'player', l: toLocal(p, player.box) };
+    for (const w of walls) if (pointInWall(p, w)) return { kind: kindName(w), w, l: toLocal(p, w) };
+    if (pointInConvex(p, EXIT)) return { kind: 'exit' };
+    return null;
+  }
+  function aimTrace() {
+    const dh = aimDir(), o = add(player.box.c, mul(dh, PLAYER_HALF + 2));
+    return { o, dh, s: traceShot(o, dh) };
+  }
+  const LENSES = [
+    {
+      name: 'Point in shape', chap: 'Chapter 22.2',
+      formula: 'circle   |p − c|² ≤ r²\nbox      min ≤ p ≤ max on x and y\nrotated  x\' = (p − c)·û, y\' = (p − c)·v̂\n         |x\'| ≤ hx and |y\'| ≤ hy\npolygon  (b − a) × (p − a) has the same\n         sign for every edge a → b',
+      used: ['Mouse picking: what is under the cursor?', 'Clicking units, buttons and map regions',
+        'Trigger zones: "is the player in the exit?"', 'Area-of-effect spells and capture points'],
+      tryThis: 'Move the mouse over a guard, a slanted wall and the green exit. On the exit, watch the five cross products; slide out of it and see which one changes sign first.',
+      draw() {
+        const p = mouse, hit = pick(p);
+        line(V(p.x - 8, p.y), V(p.x + 8, p.y), '#e6e9ef', 1.5); line(V(p.x, p.y - 8), V(p.x, p.y + 8), '#e6e9ef', 1.5);
+        const cr = polyCrosses(p, EXIT);
+        EXIT.forEach((a, i) => { const b = EXIT[(i + 1) % EXIT.length]; line(a, b, cr[i] >= 0 ? '#5fd18b' : '#ff6b6b', 3); });
+        if (hit && hit.w) {
+          pathPoly(corners(hit.w)); ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 2.5; ctx.stroke();
+          arrow(hit.w.c, mul(hit.w.u, 40), '#ffb547', 'û', 2); arrow(hit.w.c, mul(hit.w.v, 30), '#b48cff', 'v̂', 2);
+        }
+        if (hit && hit.g) circle(hit.g.pos, GUARD_R + 4, null, '#6cb8ff', 2);
+        text(hit ? hit.kind : 'nothing', p.x + 12, p.y - 10, hit ? '#6cb8ff' : '#9aa3b2', 13);
+      },
+      live() {
+        const p = mouse, hit = pick(p), cr = polyCrosses(p, EXIT);
+        let s = `mouse p = ${vs(p)}\npicked: ${hit ? hit.kind : 'nothing'}\n`;
+        if (hit && hit.kind === 'guard') s += ` |p − c|² = ${f0(hit.d2)} ≤ ${GUARD_R}² = ${GUARD_R * GUARD_R}\n`;
+        if (hit && hit.l) s += ` local (x', y') = ${vs(hit.l, f1)}\n |x'| ≤ ${f0((hit.w || player.box).hx)}, |y'| ≤ ${f0((hit.w || player.box).hy)}\n`;
+        s += `\nexit edges (b − a) × (p − a):\n ${cr.map(x => f0(x)).join('  ')}\n inside exit? ${pointInConvex(p, EXIT) ? 'YES (all one sign)' : 'no (mixed signs)'}`;
+        return s;
+      },
+    },
+    {
+      name: 'Overlap & SAT', chap: 'Chapter 22.3 & 22.7',
+      formula: 'AABB: aMin ≤ bMax and bMin ≤ aMax\n      on both x and y\nSAT, for each axis n̂:\n  r = hx·|û·n̂| + hy·|v̂·n̂|\n  overlap = rA + rB − |(cB − cA)·n̂|\nseparated if any overlap ≤ 0',
+      used: ['Boxes, crates and rotated platforms colliding', 'Pushing a character out of a wall (smallest overlap)',
+        'Convex polygons in 2D physics', 'A cheap AABB check first, then the exact test'],
+      tryThis: 'Rub the corner of your box against a slanted wall. Then untick "Use SAT": every rotated wall now acts like its dashed bounding box, and you bump into thin air.',
+      controls: `<label><input type="checkbox" data-set="sat"> Use SAT for rotated walls (off = bounding boxes)</label>`,
+      draw() {
+        const pb = player.box, e = PLAYER_HALF * Math.SQRT2;
+        ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(108,184,255,.6)'; ctx.lineWidth = 1;
+        ctx.strokeRect(pb.c.x - e, pb.c.y - e, 2 * e, 2 * e);
+        for (const w of walls) if (w.kind !== 'box') { ctx.strokeStyle = settings.sat ? 'rgba(255,181,71,.25)' : 'rgba(255,107,107,.7)'; ctx.strokeRect(w.min.x, w.min.y, w.max.x - w.min.x, w.max.y - w.min.y); }
+        ctx.setLineDash([]);
+        const w = nearestWall();
+        if (!w) return;
+        const B = settings.sat ? w : boundsOf(w);
+        pathPoly(corners(B)); ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 2; ctx.stroke();
+        const r = sat(pb, B);
+        r.axes.forEach((ax, i) => {
+          const base = add(pb.c, mul(V(-ax.n.y, ax.n.x), 46 + i * 8));
+          line(add(base, mul(ax.n, -ax.rA)), add(base, mul(ax.n, ax.rA)), '#6cb8ff', 3);
+          line(add(base, mul(ax.n, ax.dd - ax.rB)), add(base, mul(ax.n, ax.dd + ax.rB)), ax.ov > 0 ? '#ffb547' : '#5fd18b', 3);
+          if (ax === r.best) text(`min ${f1(ax.ov)}`, base.x + 6, base.y - 4, ax.ov > 0 ? '#ff6b6b' : '#5fd18b', 11);
+        });
+      },
+      live() {
+        const pb = player.box, w = nearestWall();
+        if (!w) return 'move next to a wall';
+        const B = settings.sat ? w : boundsOf(w), r = sat(pb, B);
+        const names = ['player û', 'player v̂', 'wall û', 'wall v̂'];
+        let s = `nearest: ${kindName(w)}${settings.sat ? '' : ' (as its bounding box!)'}\n axis       rA     rB    |dist|  overlap\n`;
+        r.axes.forEach((a, i) => { s += ` ${names[i].padEnd(9)} ${f1(a.rA).padStart(5)} ${f1(a.rB).padStart(6)} ${f1(Math.abs(a.dd)).padStart(7)} ${f1(a.ov).padStart(7)}\n`; });
+        s += r.hit ? ` OVERLAP: push out ${f1(r.best.ov)} px\n along the smallest axis` : ' SEPARATED: a gap on at least one axis';
+        const it = intel.find(x => !x.taken && dist(x.pos, pb.c) < 80);
+        if (it) {
+          const l = toLocal(it.pos, pb), q = V(clamp(l.x, -12, 12), clamp(l.y, -12, 12));
+          s += `\n\nintel (circle vs box)\n closest point on box ${vs(q, f1)} (local)\n distance ${f1(dist(l, q))} ≤ ${INTEL_R}? ${dist(l, q) <= INTEL_R ? 'yes' : 'no'}`;
+        }
+        return s;
+      },
+    },
+    {
+      name: 'Line of sight', chap: 'Chapter 22.4',
+      formula: 'ray p(t) = o + t·d,  d = player − guard\nwall a + u·e:\n  t = (a − o) × e ÷ (d × e)\n  u = (a − o) × d ÷ (d × e)\nblocked if 0 ≤ t ≤ 1 and 0 ≤ u ≤ 1\n(boxes: slab method, lens 5)',
+      used: ['Guards, cameras and turrets checking if they can see you', 'AI deciding whether it has a clear shot',
+        'Lights and shadows (2D visibility)', 'Which enemies a grenade blast can reach'],
+      tryThis: 'Crouch behind a thin partition near a guard. Then untick "Exact ray cast": sight now samples every N px and slips straight through the 4-px walls. Raise N to make it worse.',
+      controls: `<label><input type="checkbox" data-set="exact"> Exact ray cast</label>
+        <label>Sample step N <input type="range" min="4" max="30" step="1" data-set="step"> <span data-show="step"></span> px</label>`,
+      draw() {
+        const pb = player.box;
+        for (const g of guards) {
+          if (g.dead || !g.inRange) continue;
+          const d = sub(pb.c, g.pos);
+          if (g.sight) {
+            const hp = add(g.pos, mul(d, g.sight.t));
+            line(g.pos, hp, '#ff6b6b', 1.5); line(hp, pb.c, 'rgba(255,107,107,.3)', 1, [4, 4]);
+            circle(hp, 4, '#ff6b6b');
+            text(`t = ${f2(g.sight.t)}`, hp.x + 6, hp.y - 6, '#ff6b6b', 12);
+          } else {
+            line(g.pos, pb.c, g.inCone ? '#5fd18b' : 'rgba(95,209,139,.45)', 1.5);
+            if (!settings.exact) {
+              const n = Math.ceil(len(d) / settings.step);
+              ctx.fillStyle = '#e6e9ef';
+              for (let i = 1; i < n; i++) { const p = add(g.pos, mul(d, i / n)); ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3); }
+            }
+          }
+        }
+      },
+      live() {
+        const g = nearestGuard(); if (!g) return 'all guards down';
+        const d = sub(player.box.c, g.pos);
+        let s = `nearest guard\n o = ${vs(g.pos)}\n d = player − o = ${vs(d)}\n |d| = ${f0(g.distTo)} (range ${RANGE})\n f̂·d̂ = ${f2(g.dotVal)} ${g.inCone ? '≥' : '<'} cos 50° = ${f2(COS_HALF)}\n`;
+        if (!g.inRange) return s + ' out of range';
+        if (g.sight) {
+          s += ` first wall: ${kindName(g.sight.w)} at t = ${f2(g.sight.t)}`;
+          if (g.sight.info && g.sight.info.u !== undefined) s += `\n   u = ${f2(g.sight.info.u)}, d × e = ${f0(g.sight.info.den)}`;
+          s += '\n BLOCKED';
+        } else s += ` no wall with 0 ≤ t ≤ 1\n ${settings.exact ? 'CLEAR' : `CLEAR? (sampled every ${settings.step} px)`}`;
+        return s + `\n SEES YOU: ${g.seen ? 'YES' : 'no'}`;
+      },
+    },
+    {
+      name: 'Ray vs circle', chap: 'Chapter 22.5',
+      formula: 'm = o − c,  b = m·d̂,  k = m·m − r²\nt² + 2bt + k = 0\nt = −b ± √(b² − k)\nhit if b² − k ≥ 0 (and t ≥ 0)',
+      used: ['Hitscan weapons: rifles, lasers, railguns', 'Clicking on round units and planets',
+        'Bullets against round hitboxes and spheres', 'Picking objects in 3D with a ray from the camera'],
+      tryThis: 'Aim just beside a guard. The discriminant b² − k goes negative: a miss. Nudge the mouse until it turns positive, and both crossing points appear.',
+      draw() {
+        const { o, dh, s } = aimTrace();
+        line(o, add(o, mul(dh, s.tEnd)), 'rgba(255,224,138,.8)', 1.5, [6, 4]);
+        const g = aimGuard(o, dh);
+        if (!g) return;
+        const rc = rayCircle(o, dh, g.pos, GUARD_R), b = rc.b;
+        const q = add(o, mul(dh, -b));
+        line(g.pos, q, rc.hit ? '#ffb547' : '#9aa3b2', 1.2, [3, 3]);
+        circle(q, 3, '#e6e9ef');
+        if (rc.hit) {
+          circle(add(o, mul(dh, rc.t1)), 4, '#5fd18b'); circle(add(o, mul(dh, rc.t2)), 4, '#ff6b6b');
+          text(`t₁ = ${f0(rc.t1)}`, g.pos.x + 20, g.pos.y - 4, '#5fd18b', 12); text(`t₂ = ${f0(rc.t2)}`, g.pos.x + 20, g.pos.y + 12, '#ff6b6b', 12);
+        } else text(`miss by ${f1(Math.sqrt(Math.max(0, -rc.disc + GUARD_R * GUARD_R)) - GUARD_R)}`, g.pos.x + 20, g.pos.y, '#9aa3b2', 12);
+      },
+      live() {
+        const { o, dh, s } = aimTrace();
+        const g = aimGuard(o, dh);
+        let out = `shot ray  o = ${vs(o)}\n          d̂ = ${vs(dh, f2)}\n`;
+        if (g) {
+          const rc = rayCircle(o, dh, g.pos, GUARD_R);
+          out += `guard nearest the line  c = ${vs(g.pos)}\n b = m·d̂ = ${f1(rc.b)}\n k = m·m − r² = ${f0(rc.cc)}\n b² − k = ${f0(rc.disc)}${rc.hit ? `\n t = ${f1(-rc.b)} ± ${f1(Math.sqrt(rc.disc))}` : '  → MISS'}\n`;
+        } else out += 'no guard in front of you\n';
+        out += `\nfirst thing hit: ${s.target ? 'GUARD' : s.wall ? kindName(s.wall.w) : 'nothing'} at t = ${f0(s.tEnd)}`;
+        return out;
+      },
+    },
+    {
+      name: 'Slab method', chap: 'Chapter 22.6',
+      formula: 'tx = (minx − ox) ÷ dx … (maxx − ox) ÷ dx\nty = (miny − oy) ÷ dy … (maxy − oy) ÷ dy\nt_enter = max(near ends)\nt_exit  = min(far ends)\nhit if t_enter ≤ t_exit and t_exit ≥ 0',
+      used: ['Bullets and lasers against crates and walls', 'Mouse picking of boxes and buttons in 3D',
+        'Ray-traced shadows, bounding-volume trees', 'Rotated boxes: same test in the box\'s own axes'],
+      tryThis: 'Aim at the square crate in the middle. The ray is inside the x-slab between the blue marks and inside the y-slab between the violet ones; it is inside the box only where both overlap.',
+      draw() {
+        const { o, dh } = aimTrace();
+        const hit = firstBoxHit(o, dh);
+        if (!hit) { line(o, add(o, mul(dh, 300)), 'rgba(255,224,138,.6)', 1.2, [6, 4]); return; }
+        const w = hit.w, r = hit.info;
+        // draw the two slabs in the box's own axes
+        const big = 1600;
+        const slab = (axis, other, h, color) => {
+          for (const s of [-1, 1]) {
+            const p = add(w.c, mul(axis, s * h));
+            line(add(p, mul(other, -big)), add(p, mul(other, big)), color, 1, [4, 6]);
+          }
+        };
+        slab(w.u, w.v, w.hx, 'rgba(108,184,255,.6)');
+        slab(w.v, w.u, w.hy, 'rgba(180,140,255,.6)');
+        line(o, add(o, mul(dh, Math.max(r.tFar, 0) + 60)), 'rgba(255,224,138,.8)', 1.5);
+        const mark = (t, color, label, dy) => {
+          if (!isFinite(t)) return;
+          const p = add(o, mul(dh, t)); circle(p, 4, color); text(label, p.x + 6, p.y + dy, color, 11);
+        };
+        mark(r.tx1, '#6cb8ff', 'tx1', -6); mark(r.tx2, '#6cb8ff', 'tx2', -6);
+        mark(r.ty1, '#b48cff', 'ty1', 14); mark(r.ty2, '#b48cff', 'ty2', 14);
+        circle(add(o, mul(dh, r.tNear)), 6, null, '#5fd18b', 2.5);
+      },
+      live() {
+        const { o, dh } = aimTrace();
+        const hit = firstBoxHit(o, dh);
+        if (!hit) return 'aim at a box or rotated wall';
+        const r = hit.info, F = t => isFinite(t) ? f1(t) : (t > 0 ? '+∞' : '−∞');
+        return `${kindName(hit.w)}${hit.w.kind === 'obb' ? ' (ray moved into its axes)' : ''}\n x-slab  tx1 = ${F(r.tx1)}  tx2 = ${F(r.tx2)}\n y-slab  ty1 = ${F(r.ty1)}  ty2 = ${F(r.ty2)}\n t_enter = max(${F(r.tx1)}, ${F(r.ty1)}) = ${F(r.tNear)}\n t_exit  = min(${F(r.tx2)}, ${F(r.ty2)}) = ${F(r.tFar)}\n ${r.tNear <= r.tFar ? 'HIT' : 'miss'} at t = ${F(r.tNear)}`;
+      },
+    },
+    {
+      name: 'Tunneling', chap: 'Chapter 22.8',
+      formula: 'step per frame = v × Δt\n1100 px/s × 1/60 s ≈ 18 px\npoint test: catches a 4-px wall\n  only about 4 ÷ 18 of the time\nswept test: cast o → o + v·Δt',
+      used: ['Fast bullets passing through thin walls', 'Characters falling through floors at low frame rates',
+        'Continuous collision detection in physics', 'Sight and sound checks that sample along a line'],
+      tryThis: 'Untick "Exact ray cast" and let a guard shoot at you through a thin partition: with a point test, most bullets jump straight over it. The white dots are where the bullet is actually tested.',
+      controls: `<label><input type="checkbox" data-set="exact"> Exact ray cast (swept bullets)</label>`,
+      draw() {
+        for (const b of bullets) {
+          if (!b.prev) continue;
+          line(b.prev, b.pos, settings.exact ? '#5fd18b' : 'rgba(230,233,239,.5)', 2);
+          circle(b.prev, 2.5, '#e6e9ef'); circle(b.pos, 2.5, '#e6e9ef');
+          text(`${f0(b.step)} px`, b.pos.x + 6, b.pos.y - 6, '#e6e9ef', 11);
+        }
+      },
+      live() {
+        const step = GUARD_BULLET * lastDt;
+        return `guard bullet speed ${GUARD_BULLET} px/s\nΔt this frame ${f1(lastDt * 1000)} ms\nstep v × Δt = ${f1(step)} px\nthin wall ${THIN} px  →  point test catches\n  about ${f0(Math.min(1, THIN / step) * 100)}% of head-on crossings\nsight samples every ${settings.step} px → ${f0(Math.min(1, THIN / settings.step) * 100)}%\nmode: ${settings.exact ? 'EXACT (swept segment)' : 'POINT TESTS (tunnels!)'}\nbullets in flight: ${bullets.length}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+  function nearestWall() {
+    let best = null, bd = Infinity;
+    const c = player.box.c;
+    for (const w of walls) {
+      const l = toLocal(c, w), q = V(clamp(l.x, -w.hx, w.hx), clamp(l.y, -w.hy, w.hy)), d = dist(l, q);
+      if (d < bd && d < 60) { bd = d; best = w; }
+    }
+    return best;
+  }
+  function aimGuard(o, dh) {
+    let best = null, bd = Infinity;
+    for (const g of guards) {
+      if (g.dead) continue;
+      const m = sub(g.pos, o), along = dot(m, dh);
+      if (along < 0) continue;
+      const perp = Math.abs(cross(dh, m));
+      if (perp < bd && perp < 120) { bd = perp; best = g; }
+    }
+    return best;
+  }
+  function firstBoxHit(o, dh) {
+    let best = null;
+    for (const w of walls) {
+      if (w.kind === 'thin') continue;
+      const info = w.kind === 'box' ? rayBox(o, dh, w.min, w.max) : rayOBB(o, dh, w);
+      if (info && info.tNear >= 0 && (!best || info.tNear < best.info.tNear)) best = { w, info };
+    }
+    return best;
+  }
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–6 to see the intersection tests behind every glance and every shot.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), lastDt = 1 / 60, liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now; lastDt = dt;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

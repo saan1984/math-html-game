@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fit the Screen</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .controls select { font: inherit; font-size: 12.5px; background: #11151c; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Fit the Screen</h1>
+    <p class="sub">Grab all 12 crystals before the slimes get you. Then change the shape of the screen and watch the game scale to fit it.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Shoot</b> hold mouse (or Space) · <b>Screen shape</b> F ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => (Math.abs(n) < 0.0005 ? 0 : n).toFixed(3);
+
+  // ---------- Constants (the chapter quotes these) ----------
+  const VW = 320, VH = 180;            // virtual screen, in virtual pixels (16:9)
+  const PPM = 16;                      // virtual pixels per meter (1 tile = 1 m)
+  const LEVEL = { w: 64, h: 36 };      // meters
+  const VIEW = { w: VW / PPM, h: VH / PPM };   // 20 × 11.25 m
+  const MINI = { w: 64, h: 36, x: VW - 64 - 4, y: 4 };  // 1 virtual px per meter
+  const HERO_SPEED = 6, HERO_R = 0.5, RING_R = 12;      // m/s, m, virtual px
+  const SLIME_SPEED = 2.6, SLIME_R = 0.5, SLIME_MAX = 14, SLIME_EVERY = 2.5;
+  const BULLET_SPEED = 14, BULLET_LIFE = 0.7, COOLDOWN = 0.22;
+  const CRYSTALS = 12, PICKUP = 0.9, TIME_LIMIT = 150;
+  const PRESETS = [
+    { name: '16:9', a: 16 / 9 }, { name: '4:3', a: 4 / 3 }, { name: '21:9', a: 21 / 9 },
+    { name: 'phone portrait 9:16', a: 9 / 16 }, { name: 'phone landscape 19.5:9', a: 19.5 / 9 },
+  ];
+
+  const settings = {
+    aspect: 16 / 9,      // screen width ÷ height
+    size: 0.9,           // fraction of the space available
+    keepAspect: true,    // off = stretch
+    fill: false,         // fill (crop) instead of fit (letterbox)
+    integer: true,       // integer scaling for crisp pixels
+    mouseMap: true,      // undo the scale and the bars when reading the mouse
+  };
+
+  // ---------- Canvases ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const virt = document.createElement('canvas');       // the 320 × 180 virtual screen
+  virt.width = VW; virt.height = VH;
+  const v = virt.getContext('2d');
+  let W = 800, H = 600, DPR = 1;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- The math of fitting (this chapter) ----------
+  // scr: the device screen, in physical pixels.  g: where the game lands on it.
+  let scr = { x: 0, y: 0, w: 1, h: 1 }, g = { x: 0, y: 0, w: VW, h: VH, sx: 1, sy: 1, fitS: 1, fillS: 1 };
+  function layout() {
+    const aw = W - 40, ah = H - 80;                     // CSS px of desk space
+    let sw = Math.min(aw, ah * settings.aspect) * settings.size;
+    let sh = sw / settings.aspect;
+    scr.w = Math.max(40, Math.round(sw * DPR)); scr.h = Math.max(40, Math.round(sh * DPR));
+    scr.x = Math.round((W * DPR - scr.w) / 2); scr.y = Math.round((H * DPR + 30 * DPR - scr.h) / 2);
+    const fitS = Math.min(scr.w / VW, scr.h / VH);      // scale to fit
+    const fillS = Math.max(scr.w / VW, scr.h / VH);     // scale to fill
+    let sx, sy;
+    if (settings.keepAspect) {
+      let s = settings.fill ? fillS : fitS;
+      if (settings.integer) s = settings.fill ? Math.ceil(s) : (s >= 1 ? Math.floor(s) : s);
+      sx = sy = s;
+    } else {
+      sx = scr.w / VW; sy = scr.h / VH;                 // stretch: two different scales
+      if (settings.integer) { sx = sx >= 1 ? Math.floor(sx) : sx; sy = sy >= 1 ? Math.floor(sy) : sy; }
+    }
+    const gw = VW * sx, gh = VH * sy;
+    g = { sx, sy, fitS, fillS, w: gw, h: gh,
+      x: scr.x + Math.round((scr.w - gw) / 2), y: scr.y + Math.round((scr.h - gh) / 2) };
+  }
+  // Physical-pixel width of each virtual column, with nearest-neighbor scaling
+  const colWidth = (i, s) => Math.ceil((i + 1) * s - 0.5) - Math.ceil(i * s - 0.5);
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { cx: 0, cy: 0, down: false, inside: false };
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === 'f') cyclePreset();
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+  function setMouse(e) { const r = canvas.getBoundingClientRect(); mouse.cx = e.clientX - r.left; mouse.cy = e.clientY - r.top; mouse.inside = true; }
+  canvas.addEventListener('pointermove', setMouse);
+  canvas.addEventListener('pointerleave', () => { mouse.inside = false; mouse.down = false; });
+  canvas.addEventListener('pointerdown', e => {
+    setMouse(e);
+    if (!started) { started = true; return; }
+    if (state.over) { reset(); return; }
+    mouse.down = true;
+  });
+  addEventListener('pointerup', () => { mouse.down = false; });
+
+  function cyclePreset() {
+    const i = PRESETS.findIndex(p => Math.abs(p.a - settings.aspect) < 1e-6);
+    settings.aspect = PRESETS[(i + 1) % PRESETS.length].a;
+    syncControls();
+  }
+
+  // Canvas (CSS px) → physical px → virtual px → world meters
+  function mouseVirtual() {
+    if (!settings.mouseMap) return { x: mouse.cx, y: mouse.cy };          // the bug: no scale, no bars
+    const px = mouse.cx * DPR, py = mouse.cy * DPR;
+    return { x: (px - g.x) / g.sx, y: (py - g.y) / g.sy };
+  }
+  const virtualToWorld = p => ({ x: cam.x + p.x / PPM, y: cam.y + p.y / PPM });
+
+  // ---------- State ----------
+  let state, hero, slimes, bullets, crystals, popups, cam = { x: 0, y: 0 };
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, got: 0, kills: 0, spawnT: 1.5 };
+    hero = { x: 32, y: 26, fx: 1, fy: 0, cd: 0, hearts: 3, inv: 0 };
+    slimes = []; bullets = []; popups = []; crystals = [];
+    while (crystals.length < CRYSTALS) {
+      const c = { x: rand(3, LEVEL.w - 3), y: rand(3, LEVEL.h - 3), t: rand(0, 6) };
+      if (Math.hypot(c.x - 32, c.y - 18) < 4) continue;               // not in the fountain
+      if (Math.hypot(c.x - hero.x, c.y - hero.y) < 5) continue;
+      if (crystals.some(o => Math.hypot(o.x - c.x, o.y - c.y) < 7)) continue;
+      crystals.push(c);
+    }
+    updateCamera();
+  }
+  function updateCamera() {
+    cam.x = clamp(hero.x - VIEW.w / 2, 0, LEVEL.w - VIEW.w);
+    cam.y = clamp(hero.y - VIEW.h / 2, 0, LEVEL.h - VIEW.h);
+    cam.x = Math.round(cam.x * PPM) / PPM; cam.y = Math.round(cam.y * PPM) / PPM;   // whole virtual pixels
+  }
+  function popup(x, y, text, color) { popups.push({ x, y, text, color, life: 1 }); }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.y -= 1.2 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (state.over) return;
+    state.time += dt;
+    if (state.time >= TIME_LIMIT) { state.over = 'time'; return; }
+
+    let ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    let iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    const il = Math.hypot(ix, iy);
+    if (il > 0) { ix /= il; iy /= il; hero.fx = ix; hero.fy = iy; }
+    hero.x = clamp(hero.x + ix * HERO_SPEED * dt, 1 + HERO_R, LEVEL.w - 1 - HERO_R);
+    hero.y = clamp(hero.y + iy * HERO_SPEED * dt, 1 + HERO_R, LEVEL.h - 1 - HERO_R);
+    const fd = Math.hypot(hero.x - 32, hero.y - 18);                 // keep out of the fountain
+    if (fd < 2 + HERO_R) { hero.x = 32 + (hero.x - 32) / fd * (2 + HERO_R); hero.y = 18 + (hero.y - 18) / fd * (2 + HERO_R); }
+    hero.inv -= dt; hero.cd -= dt;
+    updateCamera();
+
+    // Shooting: toward the mouse (mapped from screen to world), or Space toward facing
+    if (hero.cd <= 0 && (mouse.down || keys[' '])) {
+      let dx = hero.fx, dy = hero.fy;
+      if (mouse.down) { const w = virtualToWorld(mouseVirtual()); dx = w.x - hero.x; dy = w.y - hero.y; }
+      const l = Math.hypot(dx, dy);
+      if (l > 0.01) { bullets.push({ x: hero.x, y: hero.y, vx: dx / l * BULLET_SPEED, vy: dy / l * BULLET_SPEED, life: BULLET_LIFE }); hero.cd = COOLDOWN; }
+    }
+    for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt; }
+
+    // Slimes
+    state.spawnT -= dt;
+    if (state.spawnT <= 0 && slimes.length < SLIME_MAX) {
+      state.spawnT = SLIME_EVERY;
+      for (let k = 0; k < 20; k++) {
+        const s = { x: rand(2, LEVEL.w - 2), y: rand(2, LEVEL.h - 2), t: rand(0, 6) };
+        if (Math.hypot(s.x - hero.x, s.y - hero.y) > 12) { slimes.push(s); break; }
+      }
+    }
+    for (const s of slimes) {
+      const dx = hero.x - s.x, dy = hero.y - s.y, d = Math.hypot(dx, dy);
+      const sp = SLIME_SPEED + state.got * 0.08;
+      if (d > 0) { s.x += dx / d * sp * dt; s.y += dy / d * sp * dt; }
+      s.t += dt;
+      for (const b of bullets) if (b.life > 0 && Math.hypot(b.x - s.x, b.y - s.y) < SLIME_R + 0.2) {
+        b.life = 0; s.dead = true; state.kills++; state.score += 10; popup(s.x, s.y - 0.6, '+10', '#ffb547');
+      }
+      if (!s.dead && d < SLIME_R + HERO_R && hero.inv <= 0) {
+        s.dead = true; hero.hearts--; hero.inv = 1.2; popup(hero.x, hero.y - 0.8, 'ouch', '#ff6b6b');
+        if (hero.hearts <= 0) state.over = 'lost';
+      }
+    }
+    slimes = slimes.filter(s => !s.dead);
+    bullets = bullets.filter(b => b.life > 0 && b.x > 0 && b.y > 0 && b.x < LEVEL.w && b.y < LEVEL.h);
+
+    for (const c of crystals) {
+      c.t += dt;
+      if (!c.taken && Math.hypot(c.x - hero.x, c.y - hero.y) < PICKUP) {
+        c.taken = true; state.got++; state.score += 100; popup(c.x, c.y - 0.6, '+100', '#6cdcff');
+        if (state.got === CRYSTALS) { state.score += Math.floor(TIME_LIMIT - state.time) * 5; state.over = 'won'; }
+      }
+    }
+  }
+
+  // ---------- Pixel art on the virtual screen ----------
+  const PAL = { h: '#3b2a20', s: '#f2c79b', b: '#2f6fb3', l: '#6cb8ff', k: '#1f2430', c: '#6cdcff', w: '#ffffff', g: '#2e9e5b', G: '#5fd18b', r: '#d64545' };
+  const HERO = ['...hhhh...', '..hhhhhh..', '..hssssh..', '..skssks..', '..ssssss..', '...ssss...',
+    '.lbbbbbbl.', '.sbbbbbbs.', '.sbbllbbs.', '..bbbbbb..', '..kk..kk..', '..kk..kk..'];
+  const CRYSTAL = ['...c...', '..ccc..', '.cwccc.', 'ccwcccc', '.ccccc.', '..ccc..', '...c...'];
+  function sprite(map, x, y) {
+    const ox = Math.round(x - map[0].length / 2), oy = Math.round(y - map.length / 2);
+    map.forEach((row, j) => { for (let i = 0; i < row.length; i++) if (row[i] !== '.') { v.fillStyle = PAL[row[i]]; v.fillRect(ox + i, oy + j, 1, 1); } });
+  }
+  function disc(cx, cy, r, color) {
+    cx = Math.round(cx); cy = Math.round(cy); v.fillStyle = color;
+    for (let dy = -r; dy <= r; dy++) { const hw = Math.floor(Math.sqrt(r * r - dy * dy) + 0.5); v.fillRect(cx - hw, cy + dy, 2 * hw + 1, 1); }
+  }
+  function ring(cx, cy, r, color) {
+    cx = Math.round(cx); cy = Math.round(cy); v.fillStyle = color;
+    for (let dy = -r - 1; dy <= r + 1; dy++) for (let dx = -r - 1; dx <= r + 1; dx++) {
+      const d = Math.hypot(dx, dy); if (d >= r - 0.5 && d < r + 0.5) v.fillRect(cx + dx, cy + dy, 1, 1);
+    }
+  }
+  const hash = (a, b) => { let h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >>> 13)) * 1274126177; return (h ^ (h >>> 16)) >>> 0; };
+  const toV = (wx, wy) => ({ x: (wx - cam.x) * PPM, y: (wy - cam.y) * PPM });   // meters → virtual px
+
+  function drawVirtual() {
+    v.fillStyle = '#16251b'; v.fillRect(0, 0, VW, VH);
+    // Floor tiles: 1 tile = 1 m = 16 × 16 virtual px
+    const tx0 = Math.floor(cam.x), ty0 = Math.floor(cam.y);
+    for (let ty = ty0; ty < ty0 + 13; ty++) for (let tx = tx0; tx < tx0 + 22; tx++) {
+      if (tx < 0 || ty < 0 || tx >= LEVEL.w || ty >= LEVEL.h) continue;
+      const p = toV(tx, ty), wall = tx === 0 || ty === 0 || tx === LEVEL.w - 1 || ty === LEVEL.h - 1;
+      v.fillStyle = wall ? '#3a3f4b' : ((tx + ty) % 2 ? '#24402d' : '#284a33');
+      v.fillRect(Math.round(p.x), Math.round(p.y), PPM, PPM);
+      const h = hash(tx, ty);
+      if (wall) { v.fillStyle = '#2b2f39'; v.fillRect(Math.round(p.x), Math.round(p.y) + 7, PPM, 1); v.fillRect(Math.round(p.x) + 7, Math.round(p.y), 1, 7); }
+      else for (let k = 0; k < 3; k++) { v.fillStyle = k ? '#3a6b47' : '#c9d36a'; v.fillRect(Math.round(p.x) + (h >> (k * 8)) % 15, Math.round(p.y) + (h >> (k * 8 + 4)) % 15, 1, 1 + (k ? 1 : 0)); }
+    }
+    // A round fountain: a circle stays a circle only if x and y are scaled equally
+    const f = toV(32, 18);
+    disc(f.x, f.y, 32, '#6b7385'); disc(f.x, f.y, 27, '#2f6fb3'); ring(f.x, f.y, 18, '#6cb8ff'); disc(f.x, f.y, 4, '#cfe6ff');
+
+    for (const c of crystals) if (!c.taken) { const p = toV(c.x, c.y); sprite(CRYSTAL, p.x, p.y + Math.round(Math.sin(c.t * 4) * 1.5)); }
+    for (const s of slimes) {
+      const p = toV(s.x, s.y), sq = Math.round(Math.sin(s.t * 8));
+      disc(p.x, p.y, 7, '#2e9e5b'); disc(p.x - 2, p.y - 3, 2, '#5fd18b');
+      v.fillStyle = '#1f2430'; v.fillRect(Math.round(p.x) - 3, Math.round(p.y) - 1 + sq, 2, 2); v.fillRect(Math.round(p.x) + 2, Math.round(p.y) - 1 + sq, 2, 2);
+    }
+    v.fillStyle = '#ffe28a';
+    for (const b of bullets) { const p = toV(b.x, b.y); v.fillRect(Math.round(p.x) - 1, Math.round(p.y) - 1, 3, 3); }
+    const hp = toV(hero.x, hero.y);
+    if (!(hero.inv > 0 && Math.floor(hero.inv * 10) % 2 === 0)) { ring(hp.x, hp.y, RING_R, '#6cb8ff'); sprite(HERO, hp.x, hp.y); }
+
+    // Minimap: 64 × 36 px for a 64 × 36 m level → 1 px per meter
+    v.fillStyle = 'rgba(10,12,16,.85)'; v.fillRect(MINI.x - 1, MINI.y - 1, MINI.w + 2, MINI.h + 2);
+    v.fillStyle = '#24402d'; v.fillRect(MINI.x, MINI.y, MINI.w, MINI.h);
+    const m = (wx, wy) => ({ x: Math.floor(MINI.x + wx * MINI.w / LEVEL.w), y: Math.floor(MINI.y + wy * MINI.h / LEVEL.h) });
+    v.fillStyle = '#2f6fb3'; const mf = m(31, 17); v.fillRect(mf.x, mf.y, 2, 2);
+    v.fillStyle = '#6cdcff'; for (const c of crystals) if (!c.taken) { const p = m(c.x, c.y); v.fillRect(p.x, p.y, 1, 1); }
+    v.fillStyle = '#d64545'; for (const s of slimes) { const p = m(s.x, s.y); v.fillRect(p.x, p.y, 1, 1); }
+    v.fillStyle = '#ffffff'; const mh = m(hero.x, hero.y); v.fillRect(mh.x, mh.y, 2, 2);
+    const mc = m(cam.x, cam.y);
+    v.strokeStyle = 'rgba(255,255,255,.7)'; v.lineWidth = 1;
+    v.strokeRect(mc.x + 0.5, mc.y + 0.5, Math.round(VIEW.w * MINI.w / LEVEL.w) - 1, Math.round(VIEW.h * MINI.h / LEVEL.h) - 1);
+
+    // Crosshair where the game thinks the mouse is
+    if (mouse.inside && started) {
+      const mv = mouseVirtual(), x = Math.round(mv.x), y = Math.round(mv.y);
+      v.fillStyle = '#ffb547';
+      v.fillRect(x - 4, y, 3, 1); v.fillRect(x + 2, y, 3, 1); v.fillRect(x, y - 4, 1, 3); v.fillRect(x, y + 2, 1, 3);
+    }
+  }
+
+  // ---------- Drawing on the real canvas ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  // Convert a virtual-pixel point to CSS px on the canvas (for lens overlays)
+  const vToCss = (x, y) => ({ x: (g.x + x * g.sx) / DPR, y: (g.y + y * g.sy) / DPR });
+  const aspectName = a => { const p = PRESETS.find(p => Math.abs(p.a - a) < 1e-6); return p ? p.name : `${f2(a)} : 1`; };
+
+  function render() {
+    layout();
+    drawVirtual();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // The device: a bezel around a black screen
+    const b = 10 * DPR;
+    ctx.fillStyle = '#2a3140'; ctx.fillRect(scr.x - b, scr.y - b, scr.w + 2 * b, scr.h + 2 * b);
+    ctx.fillStyle = '#000'; ctx.fillRect(scr.x, scr.y, scr.w, scr.h);
+    ctx.save(); ctx.beginPath(); ctx.rect(scr.x, scr.y, scr.w, scr.h); ctx.clip();
+    ctx.imageSmoothingEnabled = false;                                 // nearest neighbor: keep pixels square-edged
+    ctx.drawImage(virt, 0, 0, VW, VH, g.x, g.y, g.w, g.h);
+    ctx.restore();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    text(`screen ${scr.w} × ${scr.h} px · ${aspectName(settings.aspect)} · scale ${settings.keepAspect ? f2(g.sx) : `${f2(g.sx)} × ${f2(g.sy)}`} · DPR ${DPR}`,
+      W / 2, scr.y / DPR - 18, '#9aa3b2', 12, 'center');
+
+    // HUD, placed in the game's own coordinates so it scales with it
+    const hs = Math.max(10, 8 * g.sy / DPR), tl = vToCss(4, 4);
+    const left = Math.max(0, Math.ceil(TIME_LIMIT - state.time));
+    ctx.save(); ctx.beginPath(); ctx.rect(scr.x / DPR, scr.y / DPR, scr.w / DPR, scr.h / DPR); ctx.clip();
+    text(`${'♥'.repeat(Math.max(0, hero.hearts))}${'♡'.repeat(3 - Math.max(0, hero.hearts))}  crystals ${state.got}/${CRYSTALS}  score ${state.score}  ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`,
+      Math.max(tl.x, scr.x / DPR + 4), Math.max(tl.y, scr.y / DPR + 4) + hs, '#e6e9ef', hs);
+    for (const p of popups) {
+      const q = toV(p.x, p.y), c = vToCss(q.x, q.y);
+      ctx.globalAlpha = clamp(p.life, 0, 1); text(p.text, c.x, c.y, p.color, hs, 'center'); ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    if (!started) overlay('FIT THE SCREEN', ['Collect all 12 crystals in 2:30 · the minimap shows where they are', 'WASD to move · hold the mouse to shoot (or Space) · F changes the screen shape', 'Press any key to start']);
+    else if (state.over === 'won') overlay('ALL CRYSTALS', [`score ${state.score} · ${state.time.toFixed(1)} s · ${state.kills} slimes`, 'Press R or click to play again']);
+    else if (state.over === 'lost') overlay('THE SLIMES WIN', [`${state.got} of ${CRYSTALS} crystals · score ${state.score}`, 'Press R or click to try again']);
+    else if (state.over === 'time') overlay('TIME UP', [`${state.got} of ${CRYSTALS} crystals · score ${state.score}`, 'Press R or click to try again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  function rectCss(x, y, w, h, color, lw = 2, dash) {
+    ctx.setLineDash(dash || []); ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.strokeRect(x / DPR, y / DPR, w / DPR, h / DPR); ctx.setLineDash([]);
+  }
+  const LENSES = [
+    {
+      name: 'Aspect & fit', chap: 'Chapter 3.2–3.4',
+      formula: 'fit:  s = min(W ÷ 320, H ÷ 180)\nfill: s = max(W ÷ 320, H ÷ 180)\ngame = 320s × 180s\nbars = (W − 320s) ÷ 2, (H − 180s) ÷ 2',
+      used: ['Running one game on every monitor and phone', 'Letterboxing and pillarboxing cutscenes',
+        'Fitting images into thumbnails and cards', 'Choosing what the player sees on ultrawide screens'],
+      tryThis: 'Pick 4:3 or phone portrait: black bars appear, the game keeps its shape. Untick "Keep aspect ratio": the bars vanish, but the round fountain becomes an ellipse. Tick "Fill" to crop instead.',
+      controls: `<label>Screen <select data-set="aspect">${PRESETS.map(p => `<option value="${p.a}">${p.name}</option>`).join('')}<option value="custom" disabled>custom (slider)</option></select></label>
+        <label>Shape <input type="range" min="0.5" max="2.4" step="0.01" data-set="aspect"> <span data-show="aspect"></span></label>
+        <label>Size <input type="range" min="0.4" max="1" step="0.01" data-set="size"></label>
+        <label><input type="checkbox" data-set="keepAspect"> Keep aspect ratio</label>
+        <label><input type="checkbox" data-set="fill"> Fill (crop) instead of fit</label>`,
+      draw() {
+        rectCss(g.x, g.y, g.w, g.h, '#5fd18b', 2);
+        const bx = scr.x, by = scr.y;
+        ctx.fillStyle = 'rgba(255,181,71,.18)';
+        const left = Math.max(0, g.x - bx), top = Math.max(0, g.y - by);
+        if (left > 1) { ctx.fillRect(bx / DPR, by / DPR, left / DPR, scr.h / DPR); ctx.fillRect((g.x + g.w) / DPR, by / DPR, (bx + scr.w - g.x - g.w) / DPR, scr.h / DPR); text(`bar ${f0(left)} px`, (bx + left / 2) / DPR, (by + scr.h / 2) / DPR, '#ffb547', 12, 'center'); }
+        if (top > 1) { ctx.fillRect(bx / DPR, by / DPR, scr.w / DPR, top / DPR); ctx.fillRect(bx / DPR, (g.y + g.h) / DPR, scr.w / DPR, (by + scr.h - g.y - g.h) / DPR); text(`bar ${f0(top)} px`, (bx + scr.w / 2) / DPR, (by + top / 2) / DPR + 4, '#ffb547', 12, 'center'); }
+        if (g.x < bx || g.y < by) text(`cropped: only ${f0(scr.w / g.sx)} × ${f0(scr.h / g.sy)} of 320 × 180 virtual px visible`, W / 2, (scr.y + scr.h) / DPR + 26, '#ff6b6b', 12, 'center');
+      },
+      live() {
+        return `screen W × H   ${scr.w} × ${scr.h} px\n aspect        ${f3(scr.w / scr.h)}  (${aspectName(settings.aspect)})\n game          320 × 180  (${f3(VW / VH)})\nW ÷ 320 = ${f3(scr.w / VW)}   H ÷ 180 = ${f3(scr.h / VH)}\n fit  s = min  ${f3(g.fitS)}\n fill s = max  ${f3(g.fillS)}\nscale used     ${settings.keepAspect ? f3(g.sx) : `sx ${f3(g.sx)}, sy ${f3(g.sy)}`}\ngame on screen ${f0(g.w)} × ${f0(g.h)} px\nbars           ${f0(Math.max(0, (scr.w - g.w) / 2))} left/right, ${f0(Math.max(0, (scr.h - g.h) / 2))} top/bottom${settings.keepAspect ? '' : `\nstretch: circles ${f2(g.sy / g.sx)} × taller than wide`}`;
+      },
+    },
+    {
+      name: 'Integer scaling', chap: 'Chapter 3.5',
+      formula: 'crisp pixels need a whole-number scale\nk = floor(min(W ÷ 320, H ÷ 180))\ncolumn i is round((i+1)s) − round(i·s) px wide',
+      used: ['Pixel-art and retro games', 'Tile maps that must not show seams',
+        'UI icons and bitmap fonts', 'Emulators and "pixel perfect" modes'],
+      tryThis: 'Untick "Integer scaling" and drag the size slider slowly: the pixel columns around the hero become uneven (look at the widths). Tick it again and every virtual pixel is k × k physical pixels.',
+      controls: `<label><input type="checkbox" data-set="integer"> Integer scaling</label>
+        <label>Size <input type="range" min="0.4" max="1" step="0.01" data-set="size"></label>`,
+      draw() {
+        const hp = toV(hero.x, hero.y), i0 = Math.round(hp.x) - 8, j0 = Math.round(hp.y) - 10;
+        ctx.strokeStyle = 'rgba(255,181,71,.8)'; ctx.lineWidth = 1; ctx.beginPath();
+        for (let i = 0; i <= 16; i++) { const x = (g.x + Math.ceil((i0 + i) * g.sx - 0.5)) / DPR; ctx.moveTo(x, (g.y + j0 * g.sy) / DPR - 6); ctx.lineTo(x, (g.y + j0 * g.sy) / DPR); }
+        ctx.stroke();
+        const widths = []; for (let i = 0; i < 16; i++) widths.push(colWidth(i0 + i, g.sx));
+        const even = widths.every(w => w === widths[0]);
+        text(`column widths ${widths.join(' ')}`, (g.x + i0 * g.sx) / DPR, (g.y + j0 * g.sy) / DPR - 10, even ? '#5fd18b' : '#ff6b6b', 12);
+      },
+      live() {
+        const s = g.sx, widths = []; for (let i = 0; i < 12; i++) widths.push(colWidth(i, s));
+        return `fit scale        ${f3(g.fitS)}\nscale used       ${f3(s)}${Number.isInteger(s) ? '  (whole number)' : '  (fractional!)'}\nfirst 12 columns ${widths.join(' ')}\n one virtual px = ${f2(s)} physical px\n                = ${f2(s / DPR)} CSS px (DPR ${DPR})\nunused screen    ${f0(scr.w - Math.min(scr.w, g.w))} × ${f0(scr.h - Math.min(scr.h, g.h))} px`;
+      },
+    },
+    {
+      name: 'Units', chap: 'Chapter 3.6',
+      formula: '1 m = 1 tile = 16 virtual px\nvirtual px × s = physical px\nphysical px ÷ DPR = CSS px\nspeed 6 m/s = 96 virtual px/s',
+      used: ['Designing levels in meters or tiles, not pixels', 'Physics that works at any resolution',
+        'Converting mouse clicks into world positions', 'Sharp rendering on high-DPI screens'],
+      tryThis: 'Walk at full speed and change the screen size: the hero still crosses the 1-meter ruler in 1/6 s. Meters stay meters; only the pixels per meter change.',
+      draw() {
+        const hp = toV(hero.x, hero.y);
+        const a = vToCss(hp.x - 8, hp.y + 16), b2 = vToCss(hp.x + 8, hp.y + 16);
+        ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 2; ctx.beginPath();
+        ctx.moveTo(a.x, a.y); ctx.lineTo(b2.x, b2.y); ctx.moveTo(a.x, a.y - 4); ctx.lineTo(a.x, a.y + 4); ctx.moveTo(b2.x, b2.y - 4); ctx.lineTo(b2.x, b2.y + 4); ctx.stroke();
+        text(`1 m = 16 px = ${f1(16 * g.sx)} phys px`, (a.x + b2.x) / 2, a.y + 18, '#6cb8ff', 12, 'center');
+      },
+      live() {
+        const hp = toV(hero.x, hero.y);
+        return `hero world      (${f2(hero.x)}, ${f2(hero.y)}) m\n tile           (${Math.floor(hero.x)}, ${Math.floor(hero.y)})\n camera corner  (${f2(cam.x)}, ${f2(cam.y)}) m\n on the virtual screen  (${f0(hp.x)}, ${f0(hp.y)}) px\n physical       (${f0(g.x + hp.x * g.sx)}, ${f0(g.y + hp.y * g.sy)}) px\n CSS            (${f0((g.x + hp.x * g.sx) / DPR)}, ${f0((g.y + hp.y * g.sy) / DPR)}) px\n\nspeed ${HERO_SPEED} m/s\n = ${HERO_SPEED * PPM} virtual px/s\n = ${f0(HERO_SPEED * PPM * g.sx)} physical px/s\n = ${f0(HERO_SPEED * PPM * g.sx / DPR)} CSS px/s`;
+      },
+    },
+    {
+      name: 'Screen coordinates', chap: 'Chapter 3.7',
+      formula: 'origin top-left, x right, y DOWN\nvirtual = (physical − bar) ÷ s\nworld = camera + virtual ÷ 16',
+      used: ['Mouse and touch input on any screen size', 'Clicking buttons inside a letterboxed game',
+        'Placing UI relative to screen corners', 'Screen ↔ world conversion (Math Arena, lens 0)'],
+      tryThis: 'Hold the mouse to shoot at the orange crosshair. Untick "Map the mouse": the game reads canvas pixels as virtual pixels, ignoring the scale and the bars, so your shots fly to the wrong place.',
+      controls: `<label><input type="checkbox" data-set="mouseMap"> Map the mouse through scale and bars</label>`,
+      draw() {
+        const o = vToCss(0, 0);
+        ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(o.x + 70, o.y); ctx.stroke(); text('+x', o.x + 74, o.y + 14, '#ff6b6b', 12);
+        ctx.strokeStyle = '#5fd18b';
+        ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(o.x, o.y + 70); ctx.stroke(); text('+y (down)', o.x + 6, o.y + 84, '#5fd18b', 12);
+        text('(0, 0)', o.x + 6, o.y + 16, '#e6e9ef', 12);
+        if (mouse.inside) text(`canvas (${f0(mouse.cx)}, ${f0(mouse.cy)})`, mouse.cx + 12, mouse.cy - 10, '#ffb547', 12);
+      },
+      live() {
+        if (!mouse.inside) return 'move the mouse over the game';
+        const mv = mouseVirtual(), w = virtualToWorld(mv);
+        return `mouse on canvas  (${f0(mouse.cx)}, ${f0(mouse.cy)}) CSS px\n × DPR ${DPR}        (${f0(mouse.cx * DPR)}, ${f0(mouse.cy * DPR)}) physical\n − bars           (${f0(g.x)}, ${f0(g.y)})\n ÷ scale          ${settings.keepAspect ? f2(g.sx) : `${f2(g.sx)}, ${f2(g.sy)}`}\nvirtual px       (${f1(mv.x)}, ${f1(mv.y)})${settings.mouseMap ? '' : '  ← raw, bug!'}\nworld            (${f2(w.x)}, ${f2(w.y)}) m`;
+      },
+    },
+    {
+      name: 'Minimap', chap: 'Chapter 3.8',
+      formula: 'scale = 64 px ÷ 64 m = 1 px per m\nmain view: 16 px per m  → ratio 1 : 16\nminimap = corner + world × scale',
+      used: ['Minimaps and radar', 'World maps and fast-travel screens',
+        'Level overviews in editors', 'Showing the camera\'s view as a rectangle'],
+      tryThis: 'Find the crystals (cyan dots) on the minimap. The white box is exactly what the camera sees: 20 × 11.25 m, drawn 1/16 as large.',
+      draw() {
+        const a = vToCss(MINI.x - 1, MINI.y - 1), b2 = vToCss(MINI.x + MINI.w + 1, MINI.y + MINI.h + 1);
+        ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 2; ctx.strokeRect(a.x, a.y, b2.x - a.x, b2.y - a.y);
+        text('1 px = 1 m', b2.x, b2.y + 16, '#ffb547', 12, 'right');
+      },
+      live() {
+        const mx = MINI.x + hero.x * MINI.w / LEVEL.w, my = MINI.y + hero.y * MINI.h / LEVEL.h;
+        return `level        ${LEVEL.w} × ${LEVEL.h} m\nminimap      ${MINI.w} × ${MINI.h} px at (${MINI.x}, ${MINI.y})\nscale        ${MINI.w} ÷ ${LEVEL.w} = ${MINI.w / LEVEL.w} px per m\nhero         (${f2(hero.x)}, ${f2(hero.y)}) m\n on minimap  (${MINI.x} + ${f2(hero.x)}, ${MINI.y} + ${f2(hero.y)})\n             = (${f1(mx)}, ${f1(my)}) px\ncamera view  ${VIEW.w} × ${VIEW.h} m\n on minimap  ${VIEW.w} × ${VIEW.h} px`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function syncControls() {
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      if (el.type === 'checkbox') el.checked = settings[key];
+      else if (el.tagName === 'SELECT') {
+        const opt = [...el.options].find(o => Math.abs(parseFloat(o.value) - settings[key]) < 1e-6);
+        el.value = opt ? opt.value : 'custom';
+      } else el.value = settings[key];
+    });
+    cardEl.querySelectorAll('[data-show]').forEach(el => { el.textContent = f2(settings[el.dataset.show]); });
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see the ratios and scale factors that fit the game to the screen. Press F to change the screen's shape.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        syncControls();
+      });
+    });
+    syncControls();
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  reset();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

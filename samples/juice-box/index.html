@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Juice Box</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls select, .controls input[type=range] { flex: 1; }
+  select { background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px; }
+  .controls button { font: inherit; font-size: 12.5px; color: var(--text); background: #11151c;
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
+  .graph { display: block; width: 100%; height: 150px; background: #11151c; border-radius: 6px; margin-top: 6px; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Juice Box</h1>
+    <p class="sub">Grab coins, chain combos, dodge the bombs. Every pop, slide and squash is an easing curve you can swap.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Small helpers ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dist = (a, b) => len(sub(a, b));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const lerp = (a, b, t) => a + (b - a) * t;                       // Chapter 5
+  const lerpV = (a, b, t) => V(lerp(a.x, b.x, t), lerp(a.y, b.y, t));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+
+  // ---------- Easing curves: functions on 0 ≤ t ≤ 1 with f(0) = 0 and f(1) = 1 ----------
+  const C1 = 1.70158, C3 = C1 + 1, C4 = 2 * Math.PI / 3;
+  const EASE = {
+    linear: t => t,
+    easeInQuad: t => t * t,
+    easeOutQuad: t => 1 - (1 - t) * (1 - t),
+    easeInOutQuad: t => t < 0.5 ? 2 * t * t : 1 - 2 * (1 - t) * (1 - t),
+    easeInCubic: t => t * t * t,
+    easeOutCubic: t => 1 - Math.pow(1 - t, 3),
+    easeInOutCubic: t => t < 0.5 ? 4 * t * t * t : 1 - 4 * Math.pow(1 - t, 3),
+    smoothstep: t => 3 * t * t - 2 * t * t * t,
+    smootherstep: t => 6 * Math.pow(t, 5) - 15 * Math.pow(t, 4) + 10 * Math.pow(t, 3),
+    easeInBack: t => C3 * t * t * t - C1 * t * t,
+    easeOutBack: t => 1 + C3 * Math.pow(t - 1, 3) + C1 * Math.pow(t - 1, 2),
+    easeOutElastic: t => t <= 0 ? 0 : t === 1 ? 1 :
+      Math.pow(2, -10 * t) * Math.sin((10 * t - 0.75) * C4) + 1,
+  };
+  const FORMULA = {
+    linear: 't',
+    easeInQuad: 't²',
+    easeOutQuad: '1 − (1 − t)²',
+    easeInOutQuad: '2t² (t < ½), else 1 − 2(1 − t)²',
+    easeInCubic: 't³',
+    easeOutCubic: '1 − (1 − t)³',
+    easeInOutCubic: '4t³ (t < ½), else 1 − 4(1 − t)³',
+    smoothstep: '3t² − 2t³',
+    smootherstep: '6t⁵ − 15t⁴ + 10t³',
+    easeInBack: '2.70158t³ − 1.70158t²',
+    easeOutBack: '1 + 2.70158(t−1)³ + 1.70158(t−1)²',
+    easeOutElastic: '1 + 2^(−10t)·sin((10t − 0.75)·2π/3)',
+  };
+  const NAMES = Object.keys(EASE);
+  // Slope at the ends, measured numerically: how fast the output is changing
+  const slopeAt0 = f => (f(1e-4) - f(0)) / 1e-4;
+  const slopeAt1 = f => (f(1 - 1e-4) - f(1 - 2e-4)) / 1e-4;   // stays left of t = 1
+
+  // Each juice effect has its own curve and duration
+  const FX = {
+    coin:   { label: 'Coin flight',  ease: 'easeInOutCubic', dur: 0.6 },
+    pop:    { label: 'Pop',          ease: 'easeOutBack',    dur: 0.3 },
+    squash: { label: 'Squash',       ease: 'easeOutElastic', dur: 0.5 },
+    banner: { label: 'Banner/menu',  ease: 'easeOutCubic',   dur: 0.5 },
+    danger: { label: 'Danger ring',  ease: 'easeOutQuad',    dur: 1.2 },
+  };
+  const settings = {
+    clampT: true,       // pitfall when false: t = age ÷ duration runs past 1
+    linearOnly: false,  // pitfall when true: every effect uses ease(t) = t
+  };
+  const curveOf = key => settings.linearOnly ? 'linear' : FX[key].ease;
+  const tOf = (key, age) => settings.clampT ? clamp(age / FX[key].dur, 0, 1) : age / FX[key].dur;
+  const ease = (key, age) => EASE[curveOf(key)](tOf(key, age));
+
+  // ---------- Game constants ----------
+  const WORLD = { w: 1000, h: 700 };
+  const PLAY = { x: 20, y: 80, w: 960, h: 600 };
+  const ROUND = 75;              // seconds
+  const PLAYER_SPEED = 260;
+  const HALF = 18;               // half the box's width
+  const COIN_R = 10;
+  const PICK = HALF + COIN_R;    // 28
+  const COIN_LIFE = 6;
+  const MAX_COINS = 5;
+  const COIN_VALUE = 10;
+  const COMBO_WINDOW = 1.5;
+  const MAX_COMBO = 5;
+  const BLAST_R = 90;
+  const COUNTER = V(905, 40);
+  const SQUASH_X = 1.4, SQUASH_Y = 0.6;
+  const BANNER = { from: -220, to: 500, out: 1220, y: 200, w: 380, h: 64, hold: 1.2, outDur: 0.4 };
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if (e.target && e.target.tagName === 'SELECT') return;
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p' && !state.over) paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { if (!started) started = true; else if (state.over) reset(); });
+
+  // ---------- State ----------
+  let state, player, coins, flyers, popups, bombs, blasts, banner, bannerQueue;
+  let started = false, paused = false, best = 0;
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, combo: 0, lastPick: -99, coinTimer: 0, bombTimer: 2,
+      counterAge: 99, shake: 0, picked: 0, maxShown: false, events: { speed: false, last15: false } };
+    player = { pos: V(500, 390), vel: V(), hearts: 3, hurt: 0, squashAge: 99 };
+    coins = []; flyers = []; popups = []; bombs = []; blasts = [];
+    banner = null; bannerQueue = [];
+    for (let i = 0; i < 3; i++) spawnCoin();
+    showBanner('GO!');
+  }
+
+  function spawnCoin() {
+    for (let tries = 0; tries < 20; tries++) {
+      const p = V(rand(PLAY.x + 40, PLAY.x + PLAY.w - 40), rand(PLAY.y + 40, PLAY.y + PLAY.h - 40));
+      if (dist(p, player.pos) > 120) { coins.push({ pos: p, age: 0, life: COIN_LIFE }); return; }
+    }
+  }
+  function spawnBomb() {
+    let p;
+    if (Math.random() < 0.6) {           // aimed near the player
+      const a = rand(0, Math.PI * 2), r = rand(0, 60);
+      p = V(player.pos.x + Math.cos(a) * r, player.pos.y + Math.sin(a) * r);
+    } else {
+      p = V(rand(PLAY.x + 60, PLAY.x + PLAY.w - 60), rand(PLAY.y + 60, PLAY.y + PLAY.h - 60));
+    }
+    p.x = clamp(p.x, PLAY.x + 30, PLAY.x + PLAY.w - 30);
+    p.y = clamp(p.y, PLAY.y + 30, PLAY.y + PLAY.h - 30);
+    bombs.push({ pos: p, age: 0 });
+  }
+  function popup(pos, text, color, size = 18) { popups.push({ pos: V(pos.x, pos.y), text, color, size, age: 0, life: 0.8 }); }
+  function showBanner(text) {
+    if (banner) bannerQueue.push(text); else banner = { text, age: 0 };
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    // Animations finish even after the round ends
+    flyers = flyers.filter(f => {
+      if (f.age >= FX.coin.dur) {                    // landed on the counter
+        state.score += f.value; state.counterAge = 0;
+        if (state.over) best = Math.max(best, state.score);
+        return false;
+      }
+      return true;
+    });
+    for (const f of flyers) f.age += dt;
+    for (const p of popups) { p.age += dt; p.pos.y -= 30 * dt; }
+    popups = popups.filter(p => p.age < p.life);
+    for (const b of blasts) b.age += dt;
+    blasts = blasts.filter(b => b.age < 0.35);
+    state.counterAge += dt;
+    player.squashAge += dt;
+    state.shake = Math.max(0, state.shake - dt * 1.5);
+    if (banner) {
+      banner.age += dt;
+      if (banner.age >= FX.banner.dur + BANNER.hold + BANNER.outDur) {
+        banner = null;
+        if (bannerQueue.length) banner = { text: bannerQueue.shift(), age: 0 };
+      }
+    }
+    if (state.over) return;
+
+    state.time += dt;
+    if (state.time >= 25 && !state.events.speed) { state.events.speed = true; showBanner('Bombs speed up!'); }
+    if (state.time >= ROUND - 15 && !state.events.last15) { state.events.last15 = true; showBanner('15 seconds left!'); }
+    if (state.time >= ROUND) { state.time = ROUND; endRound('time'); return; }
+
+    // Movement
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    player.vel = mul(norm(V(ix, iy)), PLAYER_SPEED);
+    player.pos = add(player.pos, mul(player.vel, dt));
+    player.pos.x = clamp(player.pos.x, PLAY.x + HALF, PLAY.x + PLAY.w - HALF);
+    player.pos.y = clamp(player.pos.y, PLAY.y + HALF, PLAY.y + PLAY.h - HALF);
+    player.hurt -= dt;
+
+    // Coins
+    for (const c of coins) {
+      c.age += dt;
+      if (dist(c.pos, player.pos) < PICK) {
+        c.taken = true;
+        state.combo = state.time - state.lastPick < COMBO_WINDOW ? Math.min(MAX_COMBO, state.combo + 1) : 1;
+        state.lastPick = state.time;
+        const value = COIN_VALUE * state.combo;
+        flyers.push({ from: V(c.pos.x, c.pos.y), to: COUNTER, age: 0, value });
+        popup(V(c.pos.x, c.pos.y - 18), state.combo > 1 ? `+${value} ×${state.combo}` : `+${value}`,
+          state.combo > 1 ? '#ffb547' : '#ffd166');
+        player.squashAge = 0;
+        state.picked++;
+        if (state.combo === MAX_COMBO && !state.maxShown) { state.maxShown = true; showBanner('MAX COMBO ×5'); }
+      }
+    }
+    for (const c of coins) if (!c.taken && c.age >= c.life) c.gone = true;
+    coins = coins.filter(c => !c.taken && !c.gone);
+    if (state.time - state.lastPick >= COMBO_WINDOW) { state.combo = 0; state.maxShown = false; }
+    state.coinTimer -= dt;
+    if (coins.length < MAX_COINS && state.coinTimer <= 0) { spawnCoin(); state.coinTimer = 0.35; }
+
+    // Bombs: the ring grows as r = BLAST_R × ease(t); it explodes at t = 1
+    state.bombTimer -= dt;
+    if (state.bombTimer <= 0) {
+      spawnBomb();
+      state.bombTimer = Math.max(0.9, 2.2 - 0.018 * state.time);
+    }
+    for (const b of bombs) {
+      b.age += dt;
+      if (b.age >= FX.danger.dur) {
+        b.done = true;
+        blasts.push({ pos: b.pos, age: 0 });
+        state.shake = Math.min(1, state.shake + 0.25);
+        if (dist(b.pos, player.pos) < BLAST_R && player.hurt <= 0) {
+          player.hearts--; player.hurt = 1; state.combo = 0;
+          state.shake = 1;
+          popup(V(player.pos.x, player.pos.y - 30), 'OUCH', '#ff6b6b', 20);
+          if (player.hearts <= 0) { endRound('dead'); return; }
+        }
+      }
+    }
+    bombs = bombs.filter(b => !b.done);
+  }
+  function endRound(why) {
+    state.over = why;
+    bombs = [];
+    best = Math.max(best, state.score);
+  }
+
+  // ---------- Drawing helpers ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0, r), 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function dashed(on) { ctx.setLineDash(on ? [6, 6] : []); }
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+  function drawCoin(p, s) {
+    ctx.save(); ctx.translate(p.x, p.y); ctx.scale(s, s);
+    circle(V(0, 0), COIN_R, '#ffd166', '#a07a1f', 2.5);
+    ctx.fillStyle = '#a07a1f'; ctx.fillRect(-1.5, -5, 3, 10);
+    ctx.restore();
+  }
+  // Coin scale: pop in over the first 0.3 s, play the same curve backwards over its last 0.5 s
+  function coinScale(c) {
+    const left = c.life - c.age;
+    if (left < 0.5) return EASE[curveOf('pop')](clamp(left / 0.5, 0, 1));
+    if (c.age < FX.pop.dur) return ease('pop', c.age);
+    return 1;
+  }
+  function bannerX() {
+    const b = banner, inDur = FX.banner.dur;
+    if (b.age < inDur + BANNER.hold) return lerp(BANNER.from, BANNER.to, ease('banner', b.age));
+    const tOut = (b.age - inDur - BANNER.hold) / BANNER.outDur;            // 0 → 1
+    const mirrored = 1 - EASE[curveOf('banner')](clamp(1 - tOut, 0, 1));    // 1 − e(1 − t)
+    return lerp(BANNER.to, BANNER.out, mirrored);
+  }
+  // One-shot: animate for the squash duration, then rest at scale 1
+  function squash() {
+    const e = player.squashAge < FX.squash.dur ? ease('squash', player.squashAge) : 1;
+    return { sx: lerp(SQUASH_X, 1, e), sy: lerp(SQUASH_Y, 1, e), e };
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    const sh = state.shake * state.shake * 10;
+    const sx = rand(-sh, sh), sy = rand(-sh, sh);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * (OX + sx * S), DPR * (OY + sy * S));
+
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = PLAY.x; x <= PLAY.x + PLAY.w; x += 40) { ctx.moveTo(x, PLAY.y); ctx.lineTo(x, PLAY.y + PLAY.h); }
+    for (let y = PLAY.y; y <= PLAY.y + PLAY.h; y += 40) { ctx.moveTo(PLAY.x, y); ctx.lineTo(PLAY.x + PLAY.w, y); }
+    ctx.stroke();
+    ctx.strokeStyle = '#2b3242'; ctx.lineWidth = 2; ctx.strokeRect(PLAY.x, PLAY.y, PLAY.w, PLAY.h);
+
+    // Bomb telegraphs: r = 90 × ease(t)
+    for (const b of bombs) {
+      const r = BLAST_R * ease('danger', b.age);
+      const t = b.age / FX.danger.dur;
+      circle(b.pos, r, `rgba(255,107,107,${0.12 + 0.25 * clamp(t, 0, 1)})`, '#ff6b6b', 2);
+      circle(b.pos, 7, '#2a2f3a', '#ff6b6b', 2);
+      ctx.fillStyle = '#ffb547'; ctx.fillRect(b.pos.x - 1, b.pos.y - 13, 2, 6);
+    }
+    for (const b of blasts) {
+      const k = b.age / 0.35;
+      ctx.globalAlpha = 1 - k;
+      circle(b.pos, BLAST_R + 24 * k, 'rgba(255,181,71,.35)', '#ffb547', 3);
+      ctx.globalAlpha = 1;
+    }
+
+    // Coins
+    for (const c of coins) {
+      const blink = c.life - c.age < 1.5 && Math.floor(c.age * 8) % 2 === 0;
+      ctx.globalAlpha = blink ? 0.55 : 1;
+      drawCoin(c.pos, coinScale(c));
+      ctx.globalAlpha = 1;
+    }
+
+    // Player box with squash and stretch (sx·sy stays close to 1)
+    const q = squash();
+    const flash = player.hurt > 0 && Math.floor(player.hurt * 12) % 2 === 0;
+    if (!flash) {
+      ctx.save(); ctx.translate(player.pos.x, player.pos.y + HALF); ctx.scale(q.sx, q.sy);
+      roundRect(-HALF, -2 * HALF, 2 * HALF, 2 * HALF, 7);
+      ctx.fillStyle = '#2a5d8f'; ctx.fill(); ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 3; ctx.stroke();
+      ctx.fillStyle = '#e6e9ef';
+      ctx.fillRect(-9, -HALF - 6, 4, 7); ctx.fillRect(5, -HALF - 6, 4, 7);
+      ctx.restore();
+    }
+
+    // Coins flying to the counter: p = lerp(start, counter, ease(t))
+    for (const f of flyers) drawCoin(lerpV(f.from, f.to, ease('coin', f.age)), 0.9);
+
+    // Popups: scale = ease(t)
+    for (const p of popups) {
+      const s = ease('pop', p.age);
+      ctx.save(); ctx.translate(p.pos.x, p.pos.y); ctx.scale(s, s);
+      ctx.globalAlpha = clamp((p.life - p.age) / 0.3, 0, 1);
+      text(p.text, 0, 0, p.color, p.size, 'center');
+      ctx.restore();
+    }
+
+    // HUD band
+    ctx.fillStyle = '#171b23'; ctx.fillRect(0, 0, WORLD.w, 70);
+    ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, 70); ctx.lineTo(WORLD.w, 70); ctx.stroke();
+    text(`${'♥'.repeat(Math.max(0, player.hearts))}${'♡'.repeat(3 - Math.max(0, player.hearts))}`, 30, 46, '#ff6b6b', 24);
+    const left = Math.max(0, ROUND - state.time);
+    text(`${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, '0')}`, 500, 46, left < 15 ? '#ffb547' : '#e6e9ef', 26, 'center');
+    if (state.combo > 1) text(`combo ×${state.combo}`, 640, 44, '#ffb547', 16);
+    // Counter "punch": scale = lerp(1.35, 1, ease(t))
+    const punch = state.counterAge < FX.pop.dur ? lerp(1.35, 1, ease('pop', state.counterAge)) : 1;
+    ctx.save(); ctx.translate(COUNTER.x, COUNTER.y); ctx.scale(punch, punch);
+    drawCoin(V(0, 0), 1.1);
+    text(`${state.score}`, 20, 8, '#ffd166', 22);
+    ctx.restore();
+    text(`best ${best}`, 830, 62, '#6b7385', 11, 'right');
+
+    // Banner: slides in with e(t), holds, slides out with 1 − e(1 − t)
+    if (banner) {
+      const x = bannerX();
+      roundRect(x - BANNER.w / 2, BANNER.y - BANNER.h / 2, BANNER.w, BANNER.h, 12);
+      ctx.fillStyle = 'rgba(31,36,48,.95)'; ctx.fill(); ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 2; ctx.stroke();
+      text(banner.text, x, BANNER.y + 9, '#ffb547', 26, 'center');
+    }
+
+    for (const l of LENSES) if (l.on && l.draw) l.draw();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) menu('JUICE BOX', ['Collect coins, chain combos, avoid the red rings', 'WASD or arrow keys to move', 'Press any key to start']);
+    else if (state.over) menu(state.over === 'dead' ? 'OUT OF HEARTS' : 'TIME!', [`score ${state.score} · ${state.picked} coins · best ${best}`, 'Press R or click to play again']);
+    else if (paused) menu('PAUSED', ['Press P to resume']);
+  }
+
+  // Menus slide down from above the screen with the banner curve
+  let menuKind = null, menuAge = 0;
+  function menu(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.6)'; ctx.fillRect(0, 0, W, H);
+    const pw = Math.min(460, W - 24), ph = 64 + lines.length * 20;
+    const y = lerp(-ph, H / 2 - ph / 2, ease('banner', menuAge));
+    roundRect(W / 2 - pw / 2, y, pw, ph, 14);
+    ctx.fillStyle = 'rgba(23,27,35,.97)'; ctx.fill(); ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1.5; ctx.stroke();
+    text(title, W / 2, y + 38, '#e6e9ef', 26, 'center');
+    lines.forEach((l, i) => text(l, W / 2, y + 62 + i * 20, '#9aa3b2', W < 520 ? 11 : 13, 'center'));
+  }
+
+  // ---------- Lens card graph ----------
+  function plot(g, w, h, o) {
+    const pad = 22, xmax = o.xmax || 1.25, ymin = o.ymin ?? -0.35, ymax = o.ymax ?? 1.45;
+    const X = t => pad + t / xmax * (w - pad - 8);
+    const Y = v => h - pad + 4 - (v - ymin) / (ymax - ymin) * (h - pad - 10);
+    g.fillStyle = '#11151c'; g.fillRect(0, 0, w, h);
+    if (xmax > 1) { g.fillStyle = 'rgba(255,107,107,.07)'; g.fillRect(X(1), 4, X(xmax) - X(1), h - pad); }
+    g.strokeStyle = '#2a3140'; g.lineWidth = 1; g.beginPath();
+    g.moveTo(X(0), Y(0)); g.lineTo(X(xmax), Y(0)); g.moveTo(X(0), Y(1)); g.lineTo(X(xmax), Y(1));
+    g.moveTo(X(0), Y(ymin)); g.lineTo(X(0), Y(ymax)); g.moveTo(X(1), Y(ymin)); g.lineTo(X(1), Y(ymax)); g.stroke();
+    g.font = '10px Menlo, Consolas, monospace'; g.fillStyle = '#6b7385'; g.textAlign = 'right';
+    g.fillText('0', X(0) - 4, Y(0) + 3); g.fillText('1', X(0) - 4, Y(1) + 3);
+    g.textAlign = 'center'; g.fillText('t = 1', X(1), h - 6);
+    if (xmax > 1) g.fillText('t > 1', (X(1) + X(xmax)) / 2, 14);
+    g.save(); g.beginPath(); g.rect(X(0), 2, X(xmax) - X(0), h - 4); g.clip();
+    for (const c of o.curves) {
+      g.strokeStyle = c.color; g.lineWidth = c.width || 2;
+      for (const part of [[0, 1, []], [1, xmax, [4, 4]]]) {
+        if (part[0] >= part[1]) continue;
+        g.setLineDash(part[2]); g.beginPath();
+        for (let i = 0; i <= 120; i++) {
+          const t = part[0] + (part[1] - part[0]) * i / 120;
+          const v = c.f(t);
+          i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v));
+        }
+        g.stroke();
+      }
+      g.setLineDash([]);
+    }
+    for (const tg of o.tangents || []) {
+      g.strokeStyle = tg.color; g.lineWidth = 1.2; g.setLineDash([3, 3]); g.beginPath();
+      g.moveTo(X(tg.t - 0.18), Y(tg.v - 0.18 * tg.slope)); g.lineTo(X(tg.t + 0.18), Y(tg.v + 0.18 * tg.slope)); g.stroke();
+      g.setLineDash([]);
+    }
+    for (const d of o.dots || []) {
+      if (d.t > xmax) continue;
+      g.fillStyle = d.color; g.beginPath(); g.arc(X(d.t), Y(clamp(d.v, ymin, ymax)), 4, 0, Math.PI * 2); g.fill();
+    }
+    g.restore();
+    if (o.labels) o.labels.forEach((l, i) => { g.fillStyle = l.color; g.textAlign = 'left'; g.fillText(l.text, X(0) + 6, 14 + i * 12); });
+  }
+  function miniGrid(g, w, h) {
+    g.fillStyle = '#11151c'; g.fillRect(0, 0, w, h);
+    const cols = 4, rows = 3, cw = w / cols, chh = h / rows;
+    const used = new Set(Object.keys(FX).map(curveOf));
+    NAMES.forEach((n, i) => {
+      const cx = (i % cols) * cw, cy = Math.floor(i / cols) * chh;
+      const x0 = cx + 8, x1 = cx + cw - 8, y0 = cy + chh - 8, y1 = cy + 22;
+      const yv = v => y0 - (y0 - y1) * (v + 0.2) / 1.4;
+      g.strokeStyle = '#2a3140'; g.lineWidth = 1; g.beginPath();
+      g.moveTo(x0, yv(0)); g.lineTo(x1, yv(0)); g.moveTo(x0, yv(1)); g.lineTo(x1, yv(1)); g.stroke();
+      const on = used.has(n);
+      g.strokeStyle = on ? '#ffb547' : '#6cb8ff'; g.lineWidth = on ? 2.5 : 1.3; g.beginPath();
+      for (let k = 0; k <= 40; k++) { const t = k / 40; const x = x0 + (x1 - x0) * t, y = yv(EASE[n](t)); k ? g.lineTo(x, y) : g.moveTo(x, y); }
+      g.stroke();
+      g.font = '9px Menlo, Consolas, monospace'; g.fillStyle = on ? '#ffb547' : '#9aa3b2'; g.textAlign = 'left';
+      g.fillText(n.replace('ease', ''), cx + 6, cy + 11);
+    });
+  }
+
+  // ---------- Lenses ----------
+  const easeSelect = key => `<label>${FX[key].label} <select data-ease="${key}">${NAMES.map(n => `<option${n === FX[key].ease ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
+  const curveLine = key => `${curveOf(key)}(t) = ${FORMULA[curveOf(key)]}`;
+  const easeFn = key => EASE[curveOf(key)];
+  const LENSES = [
+    {
+      name: 'Coin flight', chap: 'Chapter 6.5',
+      formula: () => `p = lerp(start, counter, e)\ne = ease(t),  t = age ÷ ${FX.coin.dur} s\n${curveLine('coin')}`,
+      used: ['Coins and gems flying into the HUD', 'Items zipping into an inventory slot',
+        'Cards dealt from a deck to a hand', 'Camera cuts that glide between two shots'],
+      tryThis: 'Collect a coin with "linear", then with "easeInOutCubic". The dots on the path are equal steps in time: where they bunch up, the coin is slow.',
+      controls: () => easeSelect('coin'),
+      draw() {
+        for (const f of flyers) {
+          dashed(true); ctx.strokeStyle = 'rgba(230,233,239,.35)'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(f.from.x, f.from.y); ctx.lineTo(f.to.x, f.to.y); ctx.stroke(); dashed(false);
+          for (let i = 0; i <= 10; i++) circle(lerpV(f.from, f.to, EASE[curveOf('coin')](i / 10)), 3, '#6cb8ff');
+          const t = tOf('coin', f.age), p = lerpV(f.from, f.to, ease('coin', f.age));
+          text(`t ${f2(t)} → e ${f2(ease('coin', f.age))}`, p.x + 14, p.y + 20, '#6cb8ff', 12);
+        }
+        if (!flyers.length) text('collect a coin to see its flight', player.pos.x, player.pos.y + 44, '#9aa3b2', 12, 'center');
+      },
+      graph(g, w, h) {
+        plot(g, w, h, { xmax: 1.1, curves: [{ f: easeFn('coin'), color: '#6cb8ff' }],
+          dots: flyers.map(f => ({ t: tOf('coin', f.age), v: ease('coin', f.age), color: '#ffd166' })),
+          labels: [{ text: curveOf('coin'), color: '#6cb8ff' }] });
+      },
+      live() {
+        const f = flyers[flyers.length - 1], fn = easeFn('coin');
+        let s = `curve        ${curveOf('coin')}\nduration     ${FX.coin.dur} s\nslope at t=0 ${f2(slopeAt0(fn))}\nslope at t=1 ${f2(slopeAt1(fn))}`;
+        if (!f) return s + '\n\n(collect a coin)';
+        const d = dist(f.from, f.to), t = tOf('coin', f.age), p = lerpV(f.from, f.to, ease('coin', f.age));
+        return s + `\n\nnewest coin\n t = ${f2(t)}  e = ${f2(ease('coin', f.age))}\n p = (${f0(p.x)}, ${f0(p.y)})\n trip ${f0(d)} px, average ${f0(d / FX.coin.dur)} px/s`;
+      },
+    },
+    {
+      name: 'Pop & squash', chap: 'Chapter 6.6',
+      formula: () => `popup scale = e(t),  ${FX.pop.dur} s\nsx = lerp(${SQUASH_X}, 1, e), sy = lerp(${SQUASH_Y}, 1, e)\n${curveLine('pop')}`,
+      used: ['Damage numbers and "+10" popups', 'Buttons and icons popping in',
+        'Squash and stretch on landing or pickup', 'Bouncy reward screens and jelly UI'],
+      tryThis: 'Untick "Clamp t": popups keep computing e(age ÷ 0.3) after t passes 1, so easeOutBack balloons and easeOutQuad flips upside down. Banners and menus fly past their places too.',
+      controls: () => `${easeSelect('pop')}${easeSelect('squash')}<label><input type="checkbox" data-set="clampT"> Clamp t to 0…1</label>`,
+      draw() {
+        for (const p of popups) text(`×${f2(ease('pop', p.age))}`, p.pos.x + 30, p.pos.y + 14, '#9aa3b2', 11);
+        const q = squash();
+        text(`sx ${f2(q.sx)}  sy ${f2(q.sy)}`, player.pos.x, player.pos.y + HALF + 22, '#5fd18b', 12, 'center');
+      },
+      graph(g, w, h) {
+        const dots = popups.map(p => ({ t: p.age / FX.pop.dur, v: ease('pop', p.age), color: '#ffd166' }));
+        if (settings.clampT) for (const d of dots) d.t = Math.min(1, d.t);
+        if (player.squashAge < FX.squash.dur) dots.push({ t: tOf('squash', player.squashAge), v: ease('squash', player.squashAge), color: '#5fd18b' });
+        plot(g, w, h, { xmax: 1.5, ymin: -0.4, ymax: 1.6,
+          curves: [{ f: easeFn('pop'), color: '#6cb8ff' }, { f: easeFn('squash'), color: '#5fd18b' }], dots,
+          labels: [{ text: `pop: ${curveOf('pop')}`, color: '#6cb8ff' }, { text: `squash: ${curveOf('squash')}`, color: '#5fd18b' }] });
+      },
+      live() {
+        const p = popups[popups.length - 1], q = squash();
+        let peak = 0, peakT = 0;
+        for (let i = 0; i <= 1000; i++) { const v = easeFn('pop')(i / 1000); if (v > peak) { peak = v; peakT = i / 1000; } }
+        let s = `clamp t      ${settings.clampT ? 'ON' : 'OFF (bug)'}\npop peak     ${f2(peak)} at t = ${f2(peakT)}\nsquash  e = ${f2(q.e)}\n  sx ${f2(q.sx)}  sy ${f2(q.sy)}  area ${f2(q.sx * q.sy)}`;
+        if (p) s += `\n\nnewest popup\n age ${f2(p.age)} s → t = ${f2(p.age / FX.pop.dur)}${settings.clampT && p.age > FX.pop.dur ? ' → clamped 1' : ''}\n scale ${f2(ease('pop', p.age))}`;
+        return s;
+      },
+    },
+    {
+      name: 'Banner slide', chap: 'Chapter 6.7',
+      formula: () => `in:   x = lerp(${BANNER.from}, ${BANNER.to}, e(t))\nout:  x = lerp(${BANNER.to}, ${BANNER.out}, 1 − e(1 − t))\n${curveLine('banner')}`,
+      used: ['Menus and dialogs sliding in and out', 'Wave, level and boss banners',
+        'Notifications and toasts', 'Doors and drawers opening and closing'],
+      tryThis: 'Press "Slide a banner", or P for the pause menu. The exit plays the same curve mirrored: 1 − e(1 − t). Try easeOutBack: it overshoots on the way in and winds up before leaving.',
+      controls: () => `${easeSelect('banner')}<button data-act="banner">Slide a banner</button>`,
+      draw() {
+        if (!banner) return;
+        dashed(true); ctx.strokeStyle = 'rgba(255,181,71,.5)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(BANNER.to, BANNER.y - 50); ctx.lineTo(BANNER.to, BANNER.y + 50); ctx.stroke(); dashed(false);
+        text(`x = ${f0(bannerX())}`, BANNER.to, BANNER.y + 62, '#ffb547', 12, 'center');
+      },
+      graph(g, w, h) {
+        const fn = easeFn('banner');
+        const dots = [];
+        if (banner) {
+          const inDur = FX.banner.dur;
+          if (banner.age < inDur + BANNER.hold) dots.push({ t: banner.age / inDur, v: ease('banner', banner.age), color: '#ffd166' });
+          else { const t = (banner.age - inDur - BANNER.hold) / BANNER.outDur; dots.push({ t, v: 1 - fn(clamp(1 - t, 0, 1)), color: '#ffd166' }); }
+          if (settings.clampT) dots[0].t = Math.min(1, dots[0].t);
+        }
+        plot(g, w, h, { xmax: 1.1, curves: [{ f: fn, color: '#6cb8ff' }, { f: t => 1 - fn(1 - t), color: '#ffb547' }], dots,
+          labels: [{ text: `in  e(t)`, color: '#6cb8ff' }, { text: 'out 1 − e(1 − t)', color: '#ffb547' }] });
+      },
+      live() {
+        const fn = easeFn('banner');
+        let s = `curve   ${curveOf('banner')}\nin  ${FX.banner.dur} s · hold ${BANNER.hold} s · out ${BANNER.outDur} s\n\nmirror check at t = 0.25\n e(0.25)          ${f2(fn(0.25))}\n 1 − e(1 − 0.25)  ${f2(1 - fn(0.75))}`;
+        if (banner) s += `\n\nbanner "${banner.text}"\n x = ${f0(bannerX())}`;
+        return s;
+      },
+    },
+    {
+      name: 'Danger ring', chap: 'Chapter 6.4',
+      formula: () => `r = ${BLAST_R} × e(t),  t = age ÷ ${FX.danger.dur} s\nboom at t = 1: hit if distance < ${BLAST_R}\n${curveLine('danger')}`,
+      used: ['Telegraphing attacks and area damage', 'Charge-up meters and wind-up animations',
+        'Camera zooms and field-of-view kicks', 'Traps and platforms the player must read'],
+      tryThis: 'Switch the ring to easeInCubic: it stays tiny for most of its 1.2 s, then snaps open. That feels unfair. easeOutQuad shows the whole danger zone early.',
+      controls: () => easeSelect('danger'),
+      draw() {
+        for (const b of bombs) {
+          dashed(true); circle(b.pos, BLAST_R, null, 'rgba(230,233,239,.45)', 1.2); dashed(false);
+          const r = BLAST_R * ease('danger', b.age);
+          text(`r = ${f0(r)}`, b.pos.x, b.pos.y - BLAST_R - 6, '#ff6b6b', 12, 'center');
+        }
+      },
+      graph(g, w, h) {
+        const fn = easeFn('danger');
+        plot(g, w, h, { xmax: 1.1, curves: [{ f: fn, color: '#ff6b6b' }],
+          tangents: [{ t: 0, v: fn(0), slope: slopeAt0(fn), color: '#9aa3b2' }, { t: 1, v: fn(1), slope: slopeAt1(fn), color: '#9aa3b2' }],
+          dots: bombs.map(b => ({ t: tOf('danger', b.age), v: ease('danger', b.age), color: '#ffd166' })),
+          labels: [{ text: curveOf('danger'), color: '#ff6b6b' }] });
+      },
+      live() {
+        const fn = easeFn('danger');
+        let tHalf = 1;
+        for (let i = 0; i <= 1000; i++) if (fn(i / 1000) >= 0.5) { tHalf = i / 1000; break; }
+        let s = `curve          ${curveOf('danger')}\nslope at start ${f2(slopeAt0(fn))}\nslope at end   ${f2(slopeAt1(fn))}\nhalf size at t = ${f2(tHalf)}\n  = ${f2(tHalf * FX.danger.dur)} s, warning left ${f2((1 - tHalf) * FX.danger.dur)} s`;
+        let near = null, bd = Infinity;
+        for (const b of bombs) { const d = dist(b.pos, player.pos); if (d < bd) { bd = d; near = b; } }
+        if (near) s += `\n\nnearest bomb\n t = ${f2(tOf('danger', near.age))}  r = ${f0(BLAST_R * ease('danger', near.age))}\n you are ${f0(bd)} px away`;
+        return s;
+      },
+    },
+    {
+      name: 'All curves', chap: 'Chapter 6.2–6.3, 6.8',
+      formula: 'every curve: f(0) = 0, f(1) = 1\nsmoothstep   3t² − 2t³\nsmootherstep 6t⁵ − 15t⁴ + 10t³\nease-out(t) = 1 − ease-in(1 − t)',
+      used: ['Every tween in a UI or animation system', 'Soft thresholds and fades (smoothstep)',
+        'Blending animations and camera moves', 'Shaders: soft edges, glows and vignettes'],
+      tryThis: 'Tick "Linear only" and play for twenty seconds. Nothing is broken, yet the game feels flat and mechanical. Untick it to compare.',
+      controls: () => `<label><input type="checkbox" data-set="linearOnly"> Linear only (ease(t) = t everywhere)</label>`,
+      draw() {
+        if (settings.linearOnly) text('LINEAR ONLY', PLAY.x + 10, PLAY.y + 22, '#ffb547', 13);
+      },
+      graph(g, w, h) { miniGrid(g, w, h); },
+      live() {
+        return Object.keys(FX).map(k => `${FX[k].label.padEnd(12)} ${curveOf(k)}`).join('\n') +
+          `\n\nsmoothstep(0.25)   ${f2(EASE.smoothstep(0.25))}\nsmootherstep(0.25) ${f2(EASE.smootherstep(0.25))}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null, graphEl = null, formulaEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  const formulaText = l => typeof l.formula === 'function' ? l.formula() : l.formula;
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see the easing curve behind every pop, slide and squash, and to swap it for another.</p>`;
+      liveEl = graphEl = formulaEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula"></div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls()}</div>` : ''}
+      <h3>Live curve</h3><canvas class="graph"></canvas>
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    graphEl = cardEl.querySelector('.graph');
+    formulaEl = cardEl.querySelector('.formula');
+    formulaEl.textContent = formulaText(l);
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      el.checked = settings[key];
+      el.addEventListener('input', () => { settings[key] = el.checked; formulaEl.textContent = formulaText(l); });
+    });
+    cardEl.querySelectorAll('[data-ease]').forEach(el => {
+      el.addEventListener('change', () => { FX[el.dataset.ease].ease = el.value; formulaEl.textContent = formulaText(l); el.blur(); });
+    });
+    cardEl.querySelectorAll('[data-act="banner"]').forEach(el => {
+      el.addEventListener('click', () => { showBanner(['NICE!', 'JUICY!', 'SWEET!'][Math.floor(Math.random() * 3)]); el.blur(); });
+    });
+    updateLive();
+  }
+  function updateLive() {
+    if (liveEl && selected) liveEl.textContent = selected.live();
+    if (formulaEl && selected) formulaEl.textContent = formulaText(selected);
+  }
+  function drawGraph() {
+    if (!graphEl || !selected) return;
+    const w = graphEl.clientWidth, h = graphEl.clientHeight;
+    if (!w || !h) return;
+    const pw = Math.round(w * DPR), ph = Math.round(h * DPR);
+    if (graphEl.width !== pw || graphEl.height !== ph) { graphEl.width = pw; graphEl.height = ph; }
+    const g = graphEl.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    selected.graph(g, w, h);
+  }
+  renderCard();
+
+  // ---------- Loop ----------
+  reset();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    const kind = !started ? 'start' : state.over ? 'over' : paused ? 'pause' : null;
+    if (kind !== menuKind) { menuKind = kind; menuAge = 0; } else menuAge += dt;
+    if (started && !paused) update(dt);
+    render();
+    drawGraph();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Space Slerp</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .controls select, .controls button { font: inherit; background: #11151c; color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+  .controls button { cursor: pointer; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Space Slerp</h1>
+    <p class="sub">Beacons light up around your ship. Click one to turn the nose toward it and match its docking mark before its fuse burns out. The ship's orientation is a quaternion.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Click</b> a beacon: turn to dock with it · click empty space: just point there ·
+      <b>Space</b> turn to the most urgent beacon · <b>Drag</b> or arrows: orbit the view ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P<br>
+      World: right-handed, y up, nose along −z. Quaternion q = [w, x, y, z], Hamilton product, column vectors.
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- 3D vectors (right-handed, y up) ----------
+  const v3 = (x = 0, y = 0, z = 0) => ({ x, y, z });
+  const add3 = (a, b) => v3(a.x + b.x, a.y + b.y, a.z + b.z);
+  const sub3 = (a, b) => v3(a.x - b.x, a.y - b.y, a.z - b.z);
+  const mul3 = (a, s) => v3(a.x * s, a.y * s, a.z * s);
+  const dot3 = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+  const cross3 = (a, b) => v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+  const len3 = a => Math.hypot(a.x, a.y, a.z);
+  const norm3 = a => { const l = len3(a); return l > 0 ? mul3(a, 1 / l) : v3(); };
+  const lerp3 = (a, b, t) => add3(a, mul3(sub3(b, a), t));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const RAD = Math.PI / 180, deg = r => r / RAD;
+  const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => (Math.abs(n) < 0.0005 ? 0 : n).toFixed(3);
+  const vs3 = (v, f = f2) => `(${f(v.x)}, ${f(v.y)}, ${f(v.z)})`;
+  const EX = v3(1, 0, 0), EY = v3(0, 1, 0), EZ = v3(0, 0, 1), UP = EY, FWD = v3(0, 0, -1);
+
+  // ---------- Quaternions: q = [w, x, y, z], Hamilton product ----------
+  const Q = (w, x, y, z) => ({ w, x, y, z });
+  const QI = Q(1, 0, 0, 0);
+  const qdot = (a, b) => a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+  const qlen = a => Math.sqrt(qdot(a, a));
+  const qscale = (a, s) => Q(a.w * s, a.x * s, a.y * s, a.z * s);
+  const qadd = (a, b) => Q(a.w + b.w, a.x + b.x, a.y + b.y, a.z + b.z);
+  const qneg = a => qscale(a, -1);
+  const qconj = a => Q(a.w, -a.x, -a.y, -a.z);
+  const qnorm = a => { const l = qlen(a); return l > 1e-12 ? qscale(a, 1 / l) : QI; };
+  const qmul = (a, b) => Q(
+    a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w);
+  const qaxis = (axis, ang) => { const n = norm3(axis), s = Math.sin(ang / 2); return Q(Math.cos(ang / 2), n.x * s, n.y * s, n.z * s); };
+  // q v q* written out (also valid for non-unit q: it scales v by |q|²)
+  function qrot(q, v) {
+    const u = v3(q.x, q.y, q.z), k = q.w * q.w - dot3(u, u);
+    return add3(add3(mul3(v, k), mul3(u, 2 * dot3(u, v))), mul3(cross3(u, v), 2 * q.w));
+  }
+  // axis and angle of a unit quaternion: w = cos(α/2), |u| = sin(α/2)
+  function qaxisangle(q) {
+    const u = v3(q.x, q.y, q.z), s = len3(u);
+    return { ang: 2 * Math.atan2(s, q.w), axis: s > 1e-9 ? mul3(u, 1 / s) : null };
+  }
+  const qs = (q, f = f3) => `[${f(q.w)}, ${f(q.x)}, ${f(q.y)}, ${f(q.z)}]`;
+  // rotation angle between two orientations (the sign of q does not matter)
+  const qangle = (a, b) => 2 * Math.acos(clamp(Math.abs(qdot(qnorm(a), qnorm(b))), 0, 1));
+
+  // matrices (rows) for look-at and Euler conversion
+  const mmul = (A, B) => A.map(row => [0, 1, 2].map(j => row[0] * B[0][j] + row[1] * B[1][j] + row[2] * B[2][j]));
+  const Rx = t => { const c = Math.cos(t), s = Math.sin(t); return [[1, 0, 0], [0, c, -s], [0, s, c]]; };
+  const Ry = t => { const c = Math.cos(t), s = Math.sin(t); return [[c, 0, s], [0, 1, 0], [-s, 0, c]]; };
+  const Rz = t => { const c = Math.cos(t), s = Math.sin(t); return [[c, -s, 0], [s, c, 0], [0, 0, 1]]; };
+  function mat2q(M) {
+    const t = M[0][0] + M[1][1] + M[2][2];
+    let w, x, y, z;
+    if (t > 0) { const s = Math.sqrt(t + 1) * 2; w = s / 4; x = (M[2][1] - M[1][2]) / s; y = (M[0][2] - M[2][0]) / s; z = (M[1][0] - M[0][1]) / s; }
+    else if (M[0][0] > M[1][1] && M[0][0] > M[2][2]) { const s = Math.sqrt(1 + M[0][0] - M[1][1] - M[2][2]) * 2; w = (M[2][1] - M[1][2]) / s; x = s / 4; y = (M[0][1] + M[1][0]) / s; z = (M[0][2] + M[2][0]) / s; }
+    else if (M[1][1] > M[2][2]) { const s = Math.sqrt(1 + M[1][1] - M[0][0] - M[2][2]) * 2; w = (M[0][2] - M[2][0]) / s; x = (M[0][1] + M[1][0]) / s; y = s / 4; z = (M[1][2] + M[2][1]) / s; }
+    else { const s = Math.sqrt(1 + M[2][2] - M[0][0] - M[1][1]) * 2; w = (M[1][0] - M[0][1]) / s; x = (M[0][2] + M[2][0]) / s; y = (M[1][2] + M[2][1]) / s; z = s / 4; }
+    return qnorm(Q(w, x, y, z));
+  }
+  // columns: right, up, −nose. The nose points along f; the ship's top points as close to `hint` as it can.
+  function lookQuat(f, hint) {
+    f = norm3(f);
+    let r = cross3(f, hint);
+    if (len3(r) < 1e-4) r = cross3(f, Math.abs(f.x) < 0.9 ? EX : EZ);
+    r = norm3(r);
+    const u = cross3(r, f);
+    return mat2q([[r.x, u.x, -f.x], [r.y, u.y, -f.y], [r.z, u.z, -f.z]]);
+  }
+  // Euler angles (yaw ψ about y, pitch θ about x, roll φ about z; R = Ry(ψ)·Rx(θ)·Rz(φ)) from a quaternion
+  function q2euler(q) {
+    const { w, x, y, z } = qnorm(q);
+    const m12 = 2 * (y * z - w * x), m02 = 2 * (x * z + w * y), m22 = 1 - 2 * (x * x + y * y);
+    const m10 = 2 * (x * y + w * z), m11 = 1 - 2 * (x * x + z * z), m00 = 1 - 2 * (y * y + z * z), m20 = 2 * (x * z - w * y);
+    const pitch = Math.asin(clamp(-m12, -1, 1));
+    if (Math.abs(m12) > 0.9999) return { yaw: Math.atan2(-m20, m00), pitch, roll: 0 };
+    return { yaw: Math.atan2(m02, m22), pitch, roll: Math.atan2(m10, m11) };
+  }
+  const euler2q = e => mat2q(mmul(mmul(Ry(e.yaw), Rx(e.pitch)), Rz(e.roll)));
+
+  // ---------- Interpolation between orientations ----------
+  const METHODS = ['slerp', 'nlerp', 'lerp', 'euler'];
+  const MNAME = { slerp: 'slerp', nlerp: 'nlerp (lerp + normalize)', lerp: 'lerp of components (raw)', euler: 'lerp of Euler angles' };
+  const MCOL = { slerp: '#6cb8ff', nlerp: '#5fd18b', lerp: '#ffb547', euler: '#b48cff' };
+  function interp(method, q0, q1, t, short) {
+    let b = q1, d = qdot(q0, q1);
+    if (short && d < 0) { b = qneg(q1); d = -d; }
+    if (method === 'euler') {
+      const e0 = q2euler(q0), e1 = q2euler(q1);
+      return euler2q({
+        yaw: e0.yaw + wrapPi(e1.yaw - e0.yaw) * t,
+        pitch: e0.pitch + (e1.pitch - e0.pitch) * t,
+        roll: e0.roll + wrapPi(e1.roll - e0.roll) * t,
+      });
+    }
+    if (method === 'lerp') return qadd(qscale(q0, 1 - t), qscale(b, t));
+    if (method === 'nlerp') return qnorm(qadd(qscale(q0, 1 - t), qscale(b, t)));
+    const phi = Math.acos(clamp(d, -1, 1)), s = Math.sin(phi);
+    if (s < 1e-5) return qnorm(qadd(qscale(q0, 1 - t), qscale(b, t)));
+    return qadd(qscale(q0, Math.sin((1 - t) * phi) / s), qscale(b, Math.sin(t * phi) / s));
+  }
+
+  const settings = {
+    method: 'slerp',   // how the ship's orientation moves from q0 to q1
+    short: true,       // flip the sign of q1 when q0·q1 < 0 (take the short way)
+    flip: false,       // command with −q instead of q (the same rotation)
+    renorm: true,      // re-normalize after every small step (spin demo)
+    spin: false,       // spin demo: roll by repeated multiplication, game paused
+    rate: 110,         // turn rate in degrees per second
+  };
+
+  // ---------- Canvas (a fixed 1000 × 700 view, scaled to fit) ----------
+  const VIEW = { w: 1000, h: 700 };
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VIEW.w, H / VIEW.h);
+    OX = (W - VIEW.w * S) / 2; OY = (H - VIEW.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Camera: orbits the ship; hand projection (Chapter 17) ----------
+  const view = { az: 0.55, el: 0.38, dist: 40 };
+  const cam = { pos: v3(), f: v3(), r: v3(), u: v3() };
+  function updateCam() {
+    const c = Math.cos(view.el);
+    cam.pos = v3(view.dist * c * Math.sin(view.az), view.dist * Math.sin(view.el), view.dist * c * Math.cos(view.az));
+    cam.f = norm3(mul3(cam.pos, -1));
+    cam.r = norm3(cross3(cam.f, UP));
+    cam.u = cross3(cam.r, cam.f);
+  }
+  updateCam();
+  const FOCAL = (VIEW.h / 2) / Math.tan(30 * RAD);
+  const NEAR = 0.5;
+  function toCam(p) { const d = sub3(p, cam.pos); return v3(dot3(d, cam.r), dot3(d, cam.u), dot3(d, cam.f)); }
+  function scr(c) { return { x: VIEW.w / 2 + FOCAL * c.x / c.z, y: VIEW.h / 2 - FOCAL * c.y / c.z }; }
+  function project(p) { const c = toCam(p); return c.z > NEAR ? scr(c) : null; }
+  function line3(a, b, color, lw = 1.5) {
+    let A = toCam(a), B = toCam(b);
+    if (A.z < NEAR && B.z < NEAR) return;
+    if (A.z < NEAR) A = lerp3(A, B, (NEAR - A.z) / (B.z - A.z));
+    if (B.z < NEAR) B = lerp3(B, A, (NEAR - B.z) / (A.z - B.z));
+    const p = scr(A), q = scr(B);
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+  }
+  function poly3(pts, color, lw, closed = true) {
+    for (let i = 0; i < pts.length - (closed ? 0 : 1); i++) line3(pts[i], pts[(i + 1) % pts.length], color, lw);
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function dot3d(p, r, color) {
+    const s = project(p); if (!s) return;
+    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+  }
+  function label3(p, t, color, dx = 6, dy = -6, size = 12) {
+    const s = project(p); if (s) text(t, s.x + dx, s.y + dy, color, size);
+  }
+
+  // ---------- Ship model (nose along −z, right wing +x, up +y) ----------
+  const MODEL = [
+    [v3(0, 0, -3.2), v3(0, 0, 3)], [v3(-4.2, 0, 0.6), v3(4.2, 0, 0.6)],
+    [v3(-4.2, 0, 0.6), v3(0, 0, -0.8)], [v3(4.2, 0, 0.6), v3(0, 0, -0.8)],
+    [v3(-1.6, 0, 3), v3(1.6, 0, 3)], [v3(0, 0, 2.2), v3(0, 1.7, 3.1)], [v3(0, 1.7, 3.1), v3(0, 0, 3)],
+  ];
+  function drawShip(q, color, lw = 2.2, scale = 1) {
+    for (const [a, b] of MODEL) line3(qrot(q, mul3(a, scale)), qrot(q, mul3(b, scale)), color, lw);
+  }
+
+  // ---------- Beacons ----------
+  const RADIUS = 16, NBEACON = 12, DOCKS_TO_WIN = 12, MAX_STRIKES = 3, FUSE = 12, DOCK_TOL = 1.5 * RAD;
+  function buildBeacons() {
+    let seed = 11;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const out = [];
+    let guard = 0;
+    while (out.length < NBEACON && guard++ < 5000) {
+      const z = 2 * rnd() - 1, a = 2 * Math.PI * rnd(), r = Math.sqrt(1 - z * z);
+      const dir = v3(r * Math.cos(a), z, r * Math.sin(a));
+      if (out.some(b => dot3(b.dir, dir) > Math.cos(38 * RAD))) continue;
+      const hint = norm3(v3(rnd() - .5, rnd() - .5, rnd() - .5));
+      const qd = lookQuat(dir, hint);
+      out.push({ dir, pos: mul3(dir, RADIUS), qd, lit: false, fuse: 0, cool: 0 });
+    }
+    return out;
+  }
+
+  // ---------- State ----------
+  let state, ship, beacons, cmd, popups;
+  let started = false, paused = false;
+  function reset() {
+    beacons = buildBeacons();
+    state = { over: null, docks: 0, strikes: 0, score: 0, spawn: 0, time: 0 };
+    ship = { q: QI, steps: 0 };
+    cmd = null;
+    popups = [];
+    light(); light();
+  }
+  function light() {
+    const dark = beacons.filter(b => !b.lit && b.cool <= 0);
+    if (!dark.length) return;
+    // pick pseudo-randomly but deterministically from time
+    const b = dark[Math.floor((state.time * 997 + state.docks * 31 + state.strikes * 7 + dark.length * 13) % dark.length)];
+    b.lit = true; b.fuse = FUSE;
+  }
+  function popup(t, color) { popups.push({ text: t, color, life: 1.6, y: 300 }); }
+
+  // Begin a turn from the ship's current orientation to q1
+  function command(q1, beaconIndex) {
+    if (state.over || settings.spin) return;
+    const q0 = qnorm(ship.q);
+    let target = settings.flip ? qneg(q1) : q1;
+    const d = qdot(q0, target);
+    const useShort = settings.short;
+    const phi = Math.acos(clamp(useShort ? Math.abs(d) : d, -1, 1));
+    const total = 2 * phi;                                   // rotation angle the ship will really turn through
+    const dur = Math.max(0.3, total / (settings.rate * RAD));
+    cmd = { q0, q1: target, t: 0, dur, total, beacon: beaconIndex, done: false, short: useShort, dot: d };
+    ship.q = q0;
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.y -= 20 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (settings.spin) { spinStep(dt); return; }
+    if (state.over) return;
+    state.time += dt;
+
+    if (cmd && !cmd.done) {
+      cmd.t = Math.min(1, cmd.t + dt / cmd.dur);
+      ship.q = cmd.t >= 1 ? cmd.q1 : interp(settings.method, cmd.q0, cmd.q1, cmd.t, cmd.short);
+      if (cmd.t >= 1) {
+        cmd.done = true;
+        const b = beacons[cmd.beacon];
+        if (b && b.lit && qangle(ship.q, b.qd) < DOCK_TOL) {
+          const pts = Math.ceil(b.fuse * 10);
+          state.docks++; state.score += pts; b.lit = false; b.cool = 3;
+          popup(`docked +${pts}`, '#5fd18b');
+          if (state.docks >= DOCKS_TO_WIN) state.over = 'won';
+        }
+      }
+    }
+    for (const b of beacons) {
+      if (b.cool > 0) b.cool -= dt;
+      if (b.lit) {
+        b.fuse -= dt;
+        if (b.fuse <= 0) {
+          b.lit = false; b.cool = 4; state.strikes++;
+          popup('fuse burned out!', '#ff6b6b');
+          if (state.strikes >= MAX_STRIKES) state.over = 'lost';
+        }
+      }
+    }
+    state.spawn -= dt;
+    if (state.spawn <= 0) { if (beacons.filter(b => b.lit).length < 3) light(); state.spawn = 3.2; }
+  }
+
+  // Spin demo: the ship keeps rolling about its own nose axis by repeated multiplication with a SMALL-ANGLE step
+  const SPIN = 180 * RAD;
+  function spinStep(dt) {
+    const th = SPIN * dt;
+    const step = Q(1, 0, 0, th / 2);                       // c ≈ 1, s ≈ θ/2: not quite a unit quaternion
+    ship.q = qmul(ship.q, step);
+    if (settings.renorm) ship.q = qnorm(ship.q);
+    ship.steps++;
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === ' ') urgent();
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  function urgent() {
+    let best = -1;
+    beacons.forEach((b, i) => { if (b.lit && (best < 0 || b.fuse < beacons[best].fuse)) best = i; });
+    if (best >= 0) command(beacons[best].qd, best);
+  }
+  let drag = null;
+  function vpos(e) { const r = canvas.getBoundingClientRect(); return { x: ((e.clientX - r.left) - OX) / S, y: ((e.clientY - r.top) - OY) / S }; }
+  canvas.addEventListener('pointerdown', e => {
+    drag = { x: e.clientX, y: e.clientY, moved: false };
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+    if (drag.moved) {
+      view.az -= dx * 0.006; view.el = clamp(view.el + dy * 0.006, -1.3, 1.3);
+      drag.x = e.clientX; drag.y = e.clientY; updateCam();
+    }
+  });
+  canvas.addEventListener('pointerup', e => {
+    const d = drag; drag = null;
+    if (!d || d.moved) return;
+    if (!started) { started = true; return; }
+    if (state.over) { reset(); return; }
+    const p = vpos(e);
+    let best = -1, bd = 34;
+    beacons.forEach((b, i) => {
+      const s = project(b.pos); if (!s) return;
+      const dd = Math.hypot(s.x - p.x, s.y - p.y);
+      if (dd < bd) { bd = dd; best = i; }
+    });
+    if (best >= 0) command(beacons[best].qd, best);
+    else {
+      // empty space: point the nose along the view ray through the click, keeping the top as high as possible
+      const dir = norm3(add3(add3(mul3(cam.f, FOCAL), mul3(cam.r, p.x - VIEW.w / 2)), mul3(cam.u, -(p.y - VIEW.h / 2))));
+      command(lookQuat(dir, UP), null);
+    }
+  });
+
+  // ---------- Render ----------
+  function circle3(center, a, b, r, n = 48) {
+    const pts = [];
+    for (let i = 0; i < n; i++) { const t = i / n * Math.PI * 2; pts.push(add3(center, add3(mul3(a, r * Math.cos(t)), mul3(b, r * Math.sin(t))))); }
+    return pts;
+  }
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, VIEW.w, VIEW.h); ctx.clip();
+    ctx.fillStyle = '#121826'; ctx.fillRect(0, 0, VIEW.w, VIEW.h);
+
+    // reference rings (the sphere the beacons sit on)
+    poly3(circle3(v3(), EX, EZ, RADIUS), '#1f2a3a', 1);
+    poly3(circle3(v3(), EX, EY, RADIUS), '#1a2433', 1);
+    poly3(circle3(v3(), EY, EZ, RADIUS), '#1a2433', 1);
+
+    // beacons
+    beacons.forEach((b, i) => {
+      const ux = qrot(b.qd, EY), rr = qrot(b.qd, EX);
+      if (!b.lit) { dot3d(b.pos, 3, b.cool > 0 ? '#2a3140' : '#3a4256'); return; }
+      const urgent = b.fuse < 4;
+      const col = urgent ? '#ff6b6b' : '#5fd18b';
+      const isCmd = cmd && !cmd.done && cmd.beacon === i;
+      poly3(circle3(b.pos, rr, ux, 1.5), col, isCmd ? 3.2 : 2);
+      line3(b.pos, add3(b.pos, mul3(ux, 3.2)), '#ffb547', 3);               // docking mark: the ship's top points this way
+      dot3d(add3(b.pos, mul3(ux, 3.2)), 3.5, '#ffb547');
+      line3(b.pos, add3(b.pos, mul3(norm3(mul3(b.dir, -1)), 4)), 'rgba(95,209,139,.25)', 1);
+      label3(b.pos, `${b.fuse.toFixed(1)} s`, col, 10, 22, 12);
+    });
+
+    // lenses draw under the ship
+    for (const l of LENSES) if (l.on) l.draw();
+
+    // the ship (an un-normalized q will visibly scale it)
+    const qs0 = ship.q;
+    drawShip(qs0, '#e6e9ef', 2.4);
+    const nose = qrot(qs0, mul3(FWD, 14));
+    line3(v3(), nose, 'rgba(108,184,255,.55)', 1.2);
+
+    // ghost of the target orientation during a turn
+    if (cmd && !cmd.done) drawShip(cmd.q1, 'rgba(255,181,71,.38)', 1.4, 0.8);
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, VIEW.w / 2, p.y, p.color, 15, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    text(`docks ${state.docks}/${DOCKS_TO_WIN}   score ${state.score}   strikes ${state.strikes}/${MAX_STRIKES}`, 20, 28, state.strikes >= 2 ? '#ff6b6b' : '#e6e9ef', 14);
+    text(`q = ${qs(ship.q, f2)}   |q| = ${f3(qlen(ship.q))}   turn: ${settings.method}${settings.short ? '' : ' (long way allowed)'}   ${settings.rate}°/s${settings.spin ? '   SPIN DEMO' : ''}`, 20, 50, '#9aa3b2', 13);
+    ctx.restore();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('SPACE SLERP', ['Click a lit beacon to turn the ship and dock before its fuse burns out', 'Match the orange docking mark with the top of your ship', 'Press any key or click to start']);
+    else if (state.over === 'lost') overlay('THREE FUSES BURNED OUT', [`${state.docks} docks, score ${state.score}`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('ALL BEACONS DOCKED', [`score ${state.score} with ${state.strikes} strikes`, 'Press R or click to fly again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const target = () => (cmd ? cmd : null);
+  // speed of an interpolation at parameter t, as a multiple of its average speed (degrees turned per unit t)
+  function speedRatio(method, c, t) {
+    const h = 0.002;
+    const a = interp(method, c.q0, c.q1, clamp(t - h, 0, 1), c.short), b = interp(method, c.q0, c.q1, clamp(t + h, 0, 1), c.short);
+    const span = clamp(t + h, 0, 1) - clamp(t - h, 0, 1);
+    return (qangle(a, b) / span) / c.total;
+  }
+  function trail(method, c) {
+    const pts = [];
+    for (let i = 0; i <= 48; i++) pts.push(qrot(interp(method, c.q0, c.q1, i / 48, c.short), mul3(FWD, 11)));
+    return pts;
+  }
+  const LENSES = [
+    {
+      name: 'Quaternion q', chap: 'Chapter 20.1–20.3',
+      formula: 'q = [w, x, y, z] = [cos(α/2), n̂ sin(α/2)]\n|q|² = w² + x² + y² + z² = 1\nrotate v:  v′ = q v q*   (q* = [w, −x, −y, −z])',
+      used: ['Storing every orientation (ships, cameras, bones)', 'Axis and angle packed into four numbers', 'Rotating a vector without a matrix', 'Cheap, stable orientation in physics'],
+      tryThis: 'Dock with a beacon and watch q. The violet line is the one axis the ship has turned about, and w = cos(α/2) tells you the angle. Compare −q: a different list, the same turn.',
+      draw() {
+        const { ang, axis } = qaxisangle(qnorm(ship.q));
+        if (!axis) return;
+        line3(mul3(axis, -14), mul3(axis, 14), '#b48cff', 2.5);
+        label3(mul3(axis, 14), `n̂, α = ${f0(deg(ang))}°`, '#b48cff', 6, 0, 13);
+      },
+      live() {
+        const q = ship.q, n = qnorm(q), { ang, axis } = qaxisangle(n);
+        const nose = qrot(n, FWD);
+        return `q   = ${qs(q)}\n|q| = ${f3(qlen(q))}\n\naxis n̂ = ${axis ? vs3(axis) : '(none: no turn)'}\nangle α = ${f1(deg(ang))}°\ncos(α/2) = ${f3(Math.cos(ang / 2))}  (= w)\n\nnose q(0,0,−1)q* = ${vs3(nose)}\nq* = ${qs(qconj(n))}`;
+      },
+    },
+    {
+      name: 'Slerp vs lerp', chap: 'Chapter 20.6–20.7',
+      formula: 'slerp(q₀,q₁,t) = [sin((1−t)φ) q₀ + sin(tφ) q₁] / sin φ\ncos φ = q₀·q₁\nnlerp: normalize((1−t)q₀ + t q₁)\nlerp:  (1−t)q₀ + t q₁   (not a unit quaternion)',
+      used: ['Smooth turns toward a target', 'Blending animation poses (bones)', 'Camera moves between two views', 'Why raw lerp of quaternions shrinks things'],
+      tryThis: 'Click a far-away beacon. Each trail is the nose path for one method, dots at t = ¼, ½, ¾. Blue (slerp) has evenly spaced dots. Orange (raw lerp) dips inside the sphere: |q| < 1 in the middle of the turn. Switch the turn method and fly with each.',
+      controls: `<label>Turn method <select data-set="method">${METHODS.map(m => `<option value="${m}">${MNAME[m]}</option>`).join('')}</select></label>
+        <label>Turn rate <input type="range" min="30" max="360" step="10" data-set="rate"><span data-out="rate"></span></label>`,
+      draw() {
+        const c = target(); if (!c) return;
+        for (const m of METHODS) {
+          const pts = trail(m, c);
+          poly3(pts, MCOL[m], m === settings.method ? 3 : 1.6, false);
+          for (const t of [0.25, 0.5, 0.75]) {
+            const q = interp(m, c.q0, c.q1, t, c.short);
+            dot3d(qrot(q, mul3(FWD, 11)), 4, MCOL[m]);
+          }
+          drawShip(interp(m, c.q0, c.q1, 0.5, c.short), MCOL[m], 1, 0.55);
+        }
+      },
+      live() {
+        const c = target();
+        if (!c) return 'click a beacon, then compare the four trails';
+        const rows = METHODS.map(m => {
+          const q = interp(m, c.q0, c.q1, 0.25, c.short), qh = interp(m, c.q0, c.q1, 0.5, c.short);
+          return `${m.padEnd(6)} ${f1(qangle(c.q0, q) / c.total * 100).padStart(5)}%  ${f2(speedRatio(m, c, 0.02)).padStart(5)}  ${f2(speedRatio(m, c, 0.5)).padStart(5)}  ${f3(qlen(qh)).padStart(5)}`;
+        });
+        return `turn ${f1(deg(c.total))}°  (φ = ${f1(deg(c.total / 2))}° between q₀ and q₁ on the 4D sphere)\n\n         at t=¼  speed  speed  |q|\n                  t≈0    t=½   t=½\n${rows.join('\n')}\n\nspeed = degrees/sec as a multiple of the average\nperfect slerp: 25.0%, 1.00, 1.00, 1.000`;
+      },
+    },
+    {
+      name: 'Combining turns', chap: 'Chapter 20.4–20.5',
+      formula: 'do q₁ first, then q₂:  q = q₂ q₁\nHamilton: i² = j² = k² = ijk = −1\nq₂q₁ ≠ q₁q₂   (order matters)\nremaining turn: Δ = q_target q_now*',
+      used: ['Stacking rotations: parent × child bones', 'Turret on a tank on a hill', 'Adding a small turn to the current orientation', 'Measuring how far the ship still has to turn'],
+      tryThis: 'Click a beacon and watch Δ shrink to the identity [1, 0, 0, 0]. The orange line is the axis of the turn still to come. Below, the same two quarter-turns in both orders end up with the nose pointing in different directions.',
+      draw() {
+        const c = target(); if (!c || c.done) return;
+        const d = qnorm(qmul(c.q1, qconj(ship.q)));
+        const { ang, axis } = qaxisangle(d);
+        if (!axis) return;
+        line3(mul3(axis, -14), mul3(axis, 14), '#ffb547', 2.5);
+        label3(mul3(axis, 14), `Δ: ${f0(deg(ang))}° left`, '#ffb547', 6, 0, 13);
+      },
+      live() {
+        const qa = qaxis(EY, Math.PI / 2), qb = qaxis(EX, Math.PI / 2);
+        const ab = qmul(qb, qa), ba = qmul(qa, qb);
+        let head = 'no turn commanded yet';
+        const c = target();
+        if (c) {
+          const d = qmul(c.q1, qconj(ship.q)), n = qnorm(d), aa = qaxisangle(n);
+          head = `Δ = q_target q_now* = ${qs(d, f2)}\nremaining angle ${f1(deg(aa.ang > Math.PI ? 2 * Math.PI - aa.ang : aa.ang))}°`;
+        }
+        return `${head}\n\nA = yaw 90° left = ${qs(qa, f2)}\nB = pitch 90° up = ${qs(qb, f2)}\nB·A (yaw first): nose ${vs3(qrot(ab, FWD))}\nA·B (pitch first): nose ${vs3(qrot(ba, FWD))}`;
+      },
+    },
+    {
+      name: 'Short way round', chap: 'Chapter 20.7',
+      formula: 'q and −q are the same rotation\ncos φ = q₀·q₁\nif q₀·q₁ < 0: use −q₁ (turn ≤ 180°)\nelse the turn is 360° − (the short one)',
+      used: ['Animation blending that never spins the long way', 'Camera moves that do not whip around', 'Comparing orientations (use |q₀·q₁|)', 'Why a quaternion needs its sign checked'],
+      tryThis: 'Untick "Take the short way" and tick "Command with −q instead of q" (it is the same orientation). Click a beacon: the ship now takes the long way round, up to a near-360° spin. With the short-way box ticked, the sign never matters.',
+      controls: `<label><input type="checkbox" data-set="short"> Take the short way (flip sign if q₀·q₁ &lt; 0)</label>
+        <label><input type="checkbox" data-set="flip"> Command with −q instead of q</label>`,
+      draw() {
+        const c = target(); if (!c) return;
+        const pts = trail(settings.method, c);
+        poly3(pts, c.dot < 0 && !c.short ? '#ff6b6b' : '#6cb8ff', 3, false);
+      },
+      live() {
+        const c = target();
+        if (!c) return 'click a beacon to see q₀·q₁';
+        const used = c.short ? Math.abs(c.dot) : c.dot;
+        return `q₀ = ${qs(c.q0, f2)}\nq₁ = ${qs(c.q1, f2)}\nq₀·q₁ = ${f3(c.dot)}${c.dot < 0 ? '  (negative!)' : ''}\n${c.short ? (c.dot < 0 ? 'short way ON: using −q₁' : 'short way ON: no flip needed') : 'short way OFF: using q₁ as given'}\nφ = acos(${f3(used)}) = ${f1(deg(Math.acos(clamp(used, -1, 1))))}°\nturn = 2φ = ${f1(deg(c.total))}°${c.total > Math.PI + 1e-6 ? '   <-- the long way round' : ''}`;
+      },
+    },
+    {
+      name: 'Drift & renormalize', chap: 'Chapter 20.8',
+      formula: 'step = [1, θ/2·n̂]  (small-angle shortcut)\n|step|² = 1 + (θ/2)²  >  1\nq ← q·step  repeated: |q| grows\nq v q* scales v by |q|²  →  fix: q ← q/|q|',
+      used: ['Integrating angular velocity every frame', 'Physics bodies that spin for hours', 'Any quaternion built by many multiplications', 'Matrices need the same fix (Chapter 18)'],
+      tryThis: 'Tick "Spin demo", untick "Re-normalize", and watch |q|: the ship swells as it rolls because q v q* scales every vertex by |q|². Tick Re-normalize and |q| snaps back to 1.000.',
+      controls: `<label><input type="checkbox" data-set="spin"> Spin demo (rolls 180°/s, game paused)</label>
+        <label><input type="checkbox" data-set="renorm"> Re-normalize after each step</label>
+        <button type="button" data-act="reset-spin">Reset the ship's quaternion</button>`,
+      draw() {},
+      live() {
+        const q = ship.q, l = qlen(q);
+        const th = SPIN / 60;
+        return `q = ${qs(q)}\n|q| = ${f3(l)}\nship scale |q|² = ${f3(l * l)}\nsteps taken ${ship.steps}\n\nstep at 60 fps: θ = ${f3(th)} rad\n|step| = √(1+(θ/2)²) = ${(Math.sqrt(1 + (th / 2) ** 2)).toFixed(6)}\nper second: ×${Math.pow(Math.sqrt(1 + (th / 2) ** 2), 60).toFixed(4)} in |q|\nre-normalize: ${settings.renorm ? 'ON' : 'OFF'}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Dock with a few beacons first. Then press 1–5 to see the quaternions behind every turn.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const out = cardEl.querySelector(`[data-out="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (out) out.textContent = settings[key] + '°/s';
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : (el.type === 'range' ? +el.value : el.value);
+        if (out) out.textContent = settings[key] + '°/s';
+        if (key === 'spin') { cmd = null; if (!settings.spin) { ship.q = qnorm(ship.q); } }
+      });
+    });
+    const rs = cardEl.querySelector('[data-act="reset-spin"]');
+    if (rs) rs.addEventListener('click', () => { ship.q = QI; ship.steps = 0; });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  reset();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    const orbit = (keys.arrowleft ? 1 : 0) - (keys.arrowright ? 1 : 0), tilt = (keys.arrowup ? 1 : 0) - (keys.arrowdown ? 1 : 0);
+    if (orbit || tilt) { view.az += orbit * 1.4 * dt; view.el = clamp(view.el + tilt * 1.0 * dt, -1.3, 1.3); updateCam(); }
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+
+  // exposed for automated checks
+  window.__space = { qmul, qrot, qaxis, interp, lookQuat, q2euler, euler2q, qangle, get ship() { return ship; }, get beacons() { return beacons; }, command, settings };
+})();
+</script>
+</body>
+</html>

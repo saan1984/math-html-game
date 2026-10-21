@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tank Commander</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Tank Commander</h1>
+    <p class="sub">Clear three waves of enemy tanks in a zoomable world. Every part of your tank lives in its own coordinate space.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Drive</b> WASD / arrows · <b>Aim</b> mouse · <b>Fire</b> click or Space ·
+      <b>Zoom</b> wheel or − / + · <b>Turn camera</b> Q / E ·
+      <b>Lenses</b> keys 1–4 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dist = (a, b) => len(sub(a, b));
+  const fromAngle = (t, r = 1) => V(Math.cos(t) * r, Math.sin(t) * r);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const deg = r => r * 180 / Math.PI;
+  const RAD = Math.PI / 180;
+  const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+  const P = p => `(${f1(p.x)}, ${f1(p.y)})`;
+
+  // ---------- 2D transforms as 3×3 matrices (Chapter 15) ----------
+  // Column vectors, p' = M p. Stored the way the canvas stores them:
+  //   x' = a·x + c·y + e,   y' = b·x + d·y + f
+  const M = (a, b, c, d, e, f) => ({ a, b, c, d, e, f });
+  const mmul = (A, B) => M(A.a * B.a + A.c * B.b, A.b * B.a + A.d * B.b,
+    A.a * B.c + A.c * B.d, A.b * B.c + A.d * B.d,
+    A.a * B.e + A.c * B.f + A.e, A.b * B.e + A.d * B.f + A.f);
+  const apply = (A, p) => V(A.a * p.x + A.c * p.y + A.e, A.b * p.x + A.d * p.y + A.f);   // a point (w = 1)
+  const applyDir = (A, v) => V(A.a * v.x + A.c * v.y, A.b * v.x + A.d * v.y);           // a direction (w = 0)
+  const TR = (x, y, t) => { const c = Math.cos(t), s = Math.sin(t); return M(c, s, -s, c, x, y); }; // T(x, y)·R(t)
+
+  // ---------- Settings (lens switches) ----------
+  const settings = {
+    useParent: true,      // world = parent × local   (pitfall when off)
+    zoomInInverse: true,  // world = cam + R(φ)(s − center) ÷ zoom   (pitfall when off)
+    followHeading: false, // camera turns with the tank
+    screenBars: true,     // health bars in screen space
+  };
+
+  // ---------- Constants ----------
+  const VW = 960, VH = 600;                 // the virtual screen, in screen pixels
+  const CENTER = V(VW / 2, VH / 2);         // (480, 300)
+  const WORLD = { x0: -1200, y0: -800, x1: 1200, y1: 800 };
+  const ZOOM_MIN = 0.5, ZOOM_MAX = 2.5, ZOOM_STEP = 1.15;
+  const CAM_K = 5;                          // camera follow rate (Chapter 7)
+  const CAM_TURN = 60 * RAD;                // Q / E, radians per second
+  const TURRET_MOUNT = V(-6, 0);            // turret pivot, in hull space
+  const BARREL_MOUNT = V(10, 0);            // barrel base, in turret space
+  const MUZZLE = V(28, 0);                  // barrel tip, in barrel space
+  const TREADS = [V(-24, -15), V(-24, 15)]; // track contact points, in hull space
+  const MAP = { x: 756, y: 12, k: 0.08 };   // minimap: 2400 × 1600 world → 192 × 128 pixels
+  const PLAYER = { speed: 170, reverse: 100, turn: 110 * RAD, r: 24, hp: 100, reload: 0.35,
+    shell: 620, shellLife: 1.4 };
+  const TANK = { hp: 3, speed: 85, turn: 80 * RAD, r: 22, turret: 90 * RAD, range: 520, keep: 340,
+    shell: 300, dmg: 8 };
+  const TOWER = { hp: 5, r: 24, turret: 70 * RAD, range: 560, every: 1.9, shell: 300, dmg: 8 };
+  const WAVES = [{ tanks: 3, towers: 0 }, { tanks: 4, towers: 2 }, { tanks: 6, towers: 3 }];
+  const ROCKS = [
+    [-860, -520, 52], [-520, -300, 40], [-980, 120, 48], [-640, 480, 56], [-260, -560, 44],
+    [240, -380, 50], [520, -620, 38], [760, -260, 58], [980, 180, 46], [620, 300, 42],
+    [300, 560, 54], [-60, 460, 36], [1040, -600, 40], [-380, 680, 40], [420, -80, 30], [-460, 40, 34],
+  ].map(([x, y, r]) => ({ pos: V(x, y), r }));
+  const TOWER_SPOTS = [V(-820, -180), V(700, -460), V(880, 520), V(-880, 620), V(60, -640),
+    V(-1060, -400), V(1080, -160), V(80, 660)];
+  const START = V(-200, 150);
+
+  // ---------- Canvas: window pixels → virtual screen (Chapter 3) ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VW, H / VH);
+    OX = (W - VW * S) / 2; OY = (H - VH * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- The camera: world ↔ view ↔ screen ----------
+  const cam = { x: START.x, y: START.y, zoom: 1, zoomTarget: 1, rot: 0 };
+  // screen = center + zoom · R(−φ) (world − camera)
+  function viewMatrix() {
+    const c = Math.cos(cam.rot), s = Math.sin(cam.rot), z = cam.zoom;
+    const a = z * c, b = -z * s, cc = z * s, d = z * c;
+    return M(a, b, cc, d, CENTER.x - (a * cam.x + cc * cam.y), CENTER.y - (b * cam.x + d * cam.y));
+  }
+  const worldToScreen = w => apply(viewMatrix(), w);
+  // world = camera + R(φ) (screen − center) ÷ zoom
+  function screenToWorld(s) {
+    const k = settings.zoomInInverse ? 1 / cam.zoom : 1;
+    const dx = (s.x - CENTER.x) * k, dy = (s.y - CENTER.y) * k;
+    const c = Math.cos(cam.rot), si = Math.sin(cam.rot);
+    return V(cam.x + c * dx - si * dy, cam.y + si * dx + c * dy);
+  }
+  const worldToMap = w => V(MAP.x + (w.x - WORLD.x0) * MAP.k, MAP.y + (w.y - WORLD.y0) * MAP.k);
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { s: V(CENTER.x + 120, CENTER.y), down: false };
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-4]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) { started = true; }
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === '-' || k === '_') zoomBy(1 / ZOOM_STEP);
+    if (k === '=' || k === '+') zoomBy(ZOOM_STEP);
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+  function toVirtual(e) {
+    const r = canvas.getBoundingClientRect();
+    return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+  }
+  canvas.addEventListener('pointermove', e => { mouse.s = toVirtual(e); });
+  canvas.addEventListener('pointerdown', e => {
+    mouse.s = toVirtual(e);
+    if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+    if (!started) { started = true; return; }
+    if (state.over) { reset(); return; }
+    mouse.down = true;
+  });
+  canvas.addEventListener('pointerup', () => { mouse.down = false; });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+  }, { passive: false });
+  function zoomBy(f) { cam.zoomTarget = clamp(cam.zoomTarget * f, ZOOM_MIN, ZOOM_MAX); }
+
+  // ---------- State ----------
+  let state, player, enemies, shells, parts, marks, popups, crates;
+  let started = false, paused = false;
+
+  function makeTank(pos, angle, isPlayer) {
+    return { kind: 'tank', pos: V(pos.x, pos.y), angle, speed: 0, turretLocal: 0, mount: TURRET_MOUNT,
+      recoil: 0, flash: 0, reload: isPlayer ? 0 : rnd(1.5, 3), isPlayer, hp: isPlayer ? PLAYER.hp : TANK.hp,
+      maxHp: isPlayer ? PLAYER.hp : TANK.hp, r: isPlayer ? PLAYER.r : TANK.r, side: Math.random() < 0.5 ? 1 : -1,
+      sideT: rnd(3, 6), trail: 0 };
+  }
+  function makeTower(pos) {
+    return { kind: 'tower', pos: V(pos.x, pos.y), angle: 0, speed: 0, turretLocal: rnd(-3, 3), mount: V(0, 0),
+      recoil: 0, flash: 0, reload: rnd(1, 2), hp: TOWER.hp, maxHp: TOWER.hp, r: TOWER.r };
+  }
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, wave: 0, waveDelay: 0, banner: '', bannerT: 0, hurt: 0,
+      kills: 0, shots: 0, hits: 0, mouseWorld: V() };
+    player = makeTank(START, -Math.PI / 2, true);
+    enemies = []; shells = []; parts = []; marks = []; popups = []; crates = [];
+    cam.x = START.x; cam.y = START.y; cam.rot = 0;
+    startWave(0);
+  }
+
+  function freeSpot(minFromPlayer, margin) {
+    for (let tries = 0; tries < 200; tries++) {
+      const p = V(rnd(WORLD.x0 + margin, WORLD.x1 - margin), rnd(WORLD.y0 + margin, WORLD.y1 - margin));
+      if (dist(p, player.pos) < minFromPlayer) continue;
+      if (ROCKS.some(r => dist(p, r.pos) < r.r + 50)) continue;
+      if (enemies.some(e => dist(p, e.pos) < 90)) continue;
+      return p;
+    }
+    return V(WORLD.x1 - margin, WORLD.y0 + margin);
+  }
+
+  function startWave(i) {
+    state.wave = i;
+    const w = WAVES[i];
+    for (let k = 0; k < w.tanks; k++) {
+      const p = freeSpot(650, 80);
+      enemies.push(makeTank(p, Math.atan2(player.pos.y - p.y, player.pos.x - p.x), false));
+    }
+    const spots = TOWER_SPOTS.filter(s => dist(s, player.pos) > 500).sort(() => Math.random() - 0.5);
+    for (let k = 0; k < w.towers && k < spots.length; k++) enemies.push(makeTower(spots[k]));
+    crates.push({ pos: freeSpot(250, 120), t: 0 });
+    state.banner = `WAVE ${i + 1} / ${WAVES.length}`; state.bannerT = 2.2;
+  }
+
+  // ---------- The hierarchy: hull → turret → barrel ----------
+  const hullM = t => TR(t.pos.x, t.pos.y, t.angle);                       // hull space → world
+  const turretLocalM = t => TR(t.mount.x, t.mount.y, t.turretLocal);       // turret space → hull space
+  const barrelLocalM = t => TR(BARREL_MOUNT.x - t.recoil, BARREL_MOUNT.y, 0); // barrel space → turret space
+  // world = parent × local. With the switch off, the parent is forgotten.
+  const turretWorldM = t => settings.useParent ? mmul(hullM(t), turretLocalM(t)) : turretLocalM(t);
+  const barrelWorldM = t => mmul(turretWorldM(t), barrelLocalM(t));
+
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.1 }); }
+  function burst(pos, n, color, speed) {
+    for (let i = 0; i < n; i++) parts.push({ pos: V(pos.x, pos.y), vel: fromAngle(rnd(0, 6.283), rnd(0.3, 1) * speed),
+      life: rnd(0.3, 0.7), color });
+  }
+
+  function fire(t, speed, life, err = 0) {
+    const bm = barrelWorldM(t);
+    const p = apply(bm, MUZZLE);                     // barrel tip: a point, w = 1
+    const dir = norm(applyDir(bm, V(1, 0)));         // barrel's x-axis: a direction, w = 0
+    const d = err ? fromAngle(Math.atan2(dir.y, dir.x) + err) : dir;
+    shells.push({ pos: p, vel: mul(d, speed), life, owner: t.isPlayer ? 'player' : 'enemy',
+      dmg: t.isPlayer ? 1 : (t.kind === 'tower' ? TOWER.dmg : TANK.dmg) });
+    t.recoil = 6; t.flash = 0.07;
+    if (t.isPlayer) state.shots++;
+  }
+
+  function pushOut(t) {
+    for (const r of ROCKS) {
+      const d = dist(t.pos, r.pos), rr = r.r + t.r;
+      if (d < rr && d > 0) t.pos = add(r.pos, mul(norm(sub(t.pos, r.pos)), rr));
+    }
+    t.pos.x = clamp(t.pos.x, WORLD.x0 + t.r, WORLD.x1 - t.r);
+    t.pos.y = clamp(t.pos.y, WORLD.y0 + t.r, WORLD.y1 - t.r);
+  }
+
+  function turnToward(cur, target, maxStep) { return cur + clamp(wrap(target - cur), -maxStep, maxStep); }
+
+  function drive(t, throttle, dt) {
+    const fwd = applyDir(hullM(t), V(1, 0));         // local forward (1, 0) → world
+    const before = V(t.pos.x, t.pos.y);
+    t.pos = add(t.pos, mul(fwd, throttle * dt));
+    pushOut(t);
+    t.trail += dist(before, t.pos);
+    if (t.trail > 12) {                              // tread marks at two local points
+      t.trail = 0;
+      const hm = hullM(t);
+      for (const q of TREADS) marks.push({ pos: apply(hm, q), a: t.angle });
+      if (marks.length > 700) marks.splice(0, marks.length - 700);
+    }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 26 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    for (const p of parts) { p.life -= dt; p.pos = add(p.pos, mul(p.vel, dt)); p.vel = mul(p.vel, Math.exp(-3 * dt)); }
+    parts = parts.filter(p => p.life > 0);
+    state.bannerT -= dt; state.hurt = Math.max(0, state.hurt - dt);
+
+    // Camera: follow, zoom and turn
+    const follow = 1 - Math.exp(-CAM_K * dt);
+    cam.x += (player.pos.x - cam.x) * follow;
+    cam.y += (player.pos.y - cam.y) * follow;
+    cam.zoom += (cam.zoomTarget - cam.zoom) * (1 - Math.exp(-10 * dt));
+    if (settings.followHeading) cam.rot = turnToward(cam.rot, player.angle + Math.PI / 2, 3 * dt);
+    else cam.rot = wrap(cam.rot + ((keys.e ? 1 : 0) - (keys.q ? 1 : 0)) * CAM_TURN * dt);
+
+    if (state.over) return;
+    state.time += dt;
+
+    // Player: drive in hull space
+    const thr = (keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0);
+    const steer = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    player.angle = wrap(player.angle + steer * PLAYER.turn * dt);
+    const want = thr > 0 ? PLAYER.speed : thr < 0 ? -PLAYER.reverse : 0;
+    player.speed += clamp(want - player.speed, -500 * dt, 500 * dt);
+    drive(player, player.speed, dt);
+
+    // Aim: mouse screen → world, then world → hull space for the turret's local angle
+    state.mouseWorld = screenToWorld(mouse.s);
+    const pivot = apply(hullM(player), player.mount);
+    const aimWorld = Math.atan2(state.mouseWorld.y - pivot.y, state.mouseWorld.x - pivot.x);
+    player.turretLocal = wrap(aimWorld - player.angle);
+    player.reload -= dt;
+    if ((mouse.down || keys[' ']) && player.reload <= 0) { fire(player, PLAYER.shell, PLAYER.shellLife); player.reload = PLAYER.reload; }
+
+    // Enemies
+    for (const e of enemies) {
+      const toP = sub(player.pos, e.pos), d = len(toP), dirP = Math.atan2(toP.y, toP.x);
+      if (e.kind === 'tank') {
+        e.sideT -= dt; if (e.sideT <= 0) { e.side *= -1; e.sideT = rnd(3, 6); }
+        let goal = dirP;
+        if (d < TANK.keep) goal = dirP + e.side * (d < 240 ? 2.3 : Math.PI / 2);
+        e.angle = wrap(turnToward(e.angle, goal, TANK.turn * dt));
+        const align = Math.max(0, Math.cos(wrap(goal - e.angle)));
+        drive(e, TANK.speed * align, dt);
+      }
+      const piv = apply(hullM(e), e.mount);
+      const wantLocal = wrap(Math.atan2(player.pos.y - piv.y, player.pos.x - piv.x) - e.angle);
+      const tr = e.kind === 'tower' ? TOWER.turret : TANK.turret;
+      e.turretLocal = wrap(turnToward(e.turretLocal, wantLocal, tr * dt));
+      e.reload -= dt;
+      const range = e.kind === 'tower' ? TOWER.range : TANK.range;
+      if (e.reload <= 0 && d < range && Math.abs(wrap(wantLocal - e.turretLocal)) < 0.1) {
+        fire(e, e.kind === 'tower' ? TOWER.shell : TANK.shell, 2.2, rnd(-3, 3) * RAD);
+        e.reload = e.kind === 'tower' ? TOWER.every : rnd(2.4, 3.4);
+      }
+    }
+    // Tanks do not overlap
+    const all = [player, ...enemies];
+    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+      const a = all[i], b = all[j], d = dist(a.pos, b.pos), rr = a.r + b.r;
+      if (d < rr && d > 0) {
+        const n = norm(sub(b.pos, a.pos)), push = (rr - d) / 2;
+        if (a.kind === 'tank') a.pos = sub(a.pos, mul(n, b.kind === 'tower' ? push * 2 : push));
+        if (b.kind === 'tank') b.pos = add(b.pos, mul(n, a.kind === 'tower' ? push * 2 : push));
+      }
+    }
+    for (const t of all) { t.recoil *= Math.exp(-12 * dt); t.flash -= dt; }
+
+    // Shells
+    for (const s of shells) {
+      s.pos = add(s.pos, mul(s.vel, dt)); s.life -= dt;
+      if (s.pos.x < WORLD.x0 || s.pos.x > WORLD.x1 || s.pos.y < WORLD.y0 || s.pos.y > WORLD.y1) s.life = 0;
+      for (const r of ROCKS) if (s.life > 0 && dist(s.pos, r.pos) < r.r) { s.life = 0; burst(s.pos, 5, '#8a93a6', 120); }
+      if (s.life <= 0) continue;
+      if (s.owner === 'player') {
+        for (const e of enemies) if (e.hp > 0 && dist(s.pos, e.pos) < e.r + 3) {
+          s.life = 0; e.hp -= s.dmg; state.hits++;
+          burst(s.pos, 6, '#ffb547', 160);
+          if (e.hp <= 0) {
+            const pts = e.kind === 'tower' ? 150 : 100;
+            state.score += pts; state.kills++;
+            burst(e.pos, 26, '#ff8a3d', 260); popup(e.pos, `+${pts}`, '#ffb547');
+          }
+          break;
+        }
+      } else if (dist(s.pos, player.pos) < player.r) {
+        s.life = 0; player.hp -= s.dmg; state.hurt = 0.3;
+        burst(s.pos, 8, '#ff6b6b', 160); popup(player.pos, `−${s.dmg}`, '#ff6b6b');
+        if (player.hp <= 0) { player.hp = 0; state.over = 'lost'; burst(player.pos, 40, '#ff8a3d', 300); }
+      }
+    }
+    shells = shells.filter(s => s.life > 0);
+    enemies = enemies.filter(e => e.hp > 0);
+
+    // Repair crates
+    for (const c of crates) {
+      c.t += dt;
+      if (dist(c.pos, player.pos) < 34) {
+        c.done = true; const heal = Math.min(30, PLAYER.hp - player.hp); player.hp += heal;
+        popup(c.pos, `+${heal} hp`, '#5fd18b');
+      }
+    }
+    crates = crates.filter(c => !c.done);
+
+    // Waves
+    if (!state.over && enemies.length === 0) {
+      if (state.wave === WAVES.length - 1) {
+        state.over = 'won'; state.score += player.hp * 5;
+      } else if (state.waveDelay <= 0) {
+        state.waveDelay = 3; state.score += 250; state.banner = 'WAVE CLEAR  +250'; state.bannerT = 2.2;
+      }
+    }
+    if (state.waveDelay > 0) {
+      state.waveDelay -= dt;
+      if (state.waveDelay <= 0) startWave(state.wave + 1);
+    }
+  }
+
+  // ---------- Drawing ----------
+  let BASE = M(1, 0, 0, 1, 0, 0), BV = BASE;
+  const setT = A => ctx.setTransform(A.a, A.b, A.c, A.d, A.e, A.f);
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 2, dash) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw; if (dash) ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  function arrow(from, to, color, lw = 2.5, head = 9) {
+    const v = sub(to, from); if (len(v) < 2) return;
+    const a = Math.atan2(v.y, v.x);
+    line(from, to, color, lw);
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * head, to.y - Math.sin(a - .4) * head);
+    ctx.lineTo(to.x - Math.cos(a + .4) * head, to.y - Math.sin(a + .4) * head);
+    ctx.closePath(); ctx.fill();
+  }
+  // Draws a frame's local axes, in screen space, from its matrix
+  function axes(Mw, size, label) {
+    const o = worldToScreen(apply(Mw, V(0, 0)));
+    const xs = worldToScreen(apply(Mw, V(size, 0))), ys = worldToScreen(apply(Mw, V(0, size)));
+    arrow(o, xs, '#ff6b6b', 2.5, 8); arrow(o, ys, '#5fd18b', 2.5, 8);
+    text('x', xs.x + 4, xs.y + 4, '#ff6b6b', 12); text('y', ys.x + 4, ys.y + 4, '#5fd18b', 12);
+    if (label) text(label, o.x + 8, o.y - 8, '#e6e9ef', 12);
+  }
+
+  function drawTank(t) {
+    const enemy = !t.isPlayer;
+    const body = enemy ? '#5a2f2b' : '#2a4f78', edge = enemy ? '#ff6b6b' : '#6cb8ff';
+    setT(mmul(BV, hullM(t)));                        // draw in hull space
+    if (t.kind === 'tank') {
+      ctx.fillStyle = '#1b1f27'; ctx.fillRect(-28, -20, 56, 9); ctx.fillRect(-28, 11, 56, 9);
+      ctx.fillStyle = body; ctx.fillRect(-25, -13, 50, 26);
+      ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.strokeRect(-25, -13, 50, 26);
+      ctx.fillStyle = edge; ctx.beginPath(); ctx.moveTo(25, -6); ctx.lineTo(31, 0); ctx.lineTo(25, 6); ctx.fill();
+    } else {
+      ctx.fillStyle = '#3a2a2a'; ctx.fillRect(-22, -22, 44, 44);
+      ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.strokeRect(-22, -22, 44, 44);
+    }
+    setT(mmul(BV, barrelWorldM(t)));                 // draw in barrel space
+    ctx.fillStyle = enemy ? '#7a3a33' : '#3d6fa3'; ctx.fillRect(0, -3.5, MUZZLE.x, 7);
+    ctx.strokeStyle = edge; ctx.lineWidth = 1.5; ctx.strokeRect(0, -3.5, MUZZLE.x, 7);
+    if (t.flash > 0) {                               // muzzle flash at the barrel tip
+      ctx.fillStyle = '#ffd36b'; ctx.beginPath();
+      ctx.moveTo(MUZZLE.x, -4); ctx.lineTo(MUZZLE.x + 16, -8); ctx.lineTo(MUZZLE.x + 11, 0);
+      ctx.lineTo(MUZZLE.x + 16, 8); ctx.lineTo(MUZZLE.x, 4); ctx.fill();
+    }
+    setT(mmul(BV, turretWorldM(t)));                 // draw in turret space
+    circle(V(0, 0), 13, enemy ? '#6b3a33' : '#336494', edge, 2);
+    circle(V(-4, 0), 3, '#0f1218');
+    setT(BV);
+  }
+
+  function bar(x, y, w, h, frac, color) {
+    ctx.fillStyle = 'rgba(10,12,16,.85)'; ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+    ctx.fillStyle = color; ctx.fillRect(x, y, w * clamp(frac, 0, 1), h);
+  }
+  // Screen-space anchor for a unit's health bar: 14 px above its top edge, whatever the zoom
+  const barPos = e => { const s = worldToScreen(e.pos); return V(s.x - 20, s.y - (e.r * cam.zoom + 14)); };
+
+  function edgePoint(s, margin = 18) {
+    const d = sub(s, CENTER);
+    const t = Math.min((CENTER.x - margin) / Math.max(Math.abs(d.x), 1e-6), (CENTER.y - margin) / Math.max(Math.abs(d.y), 1e-6));
+    return add(CENTER, mul(d, t));
+  }
+  const onScreen = s => s.x >= 0 && s.x <= VW && s.y >= 0 && s.y <= VH;
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    BASE = M(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    BV = mmul(BASE, viewMatrix());
+    ctx.save();
+    setT(BASE); ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
+    ctx.fillStyle = '#07090c'; ctx.fillRect(0, 0, VW, VH);
+
+    // ---- World space ----
+    setT(BV);
+    ctx.fillStyle = '#151a22'; ctx.fillRect(WORLD.x0, WORLD.y0, WORLD.x1 - WORLD.x0, WORLD.y1 - WORLD.y0);
+    ctx.strokeStyle = '#1d2330'; ctx.lineWidth = 1 / cam.zoom; ctx.beginPath();
+    for (let x = WORLD.x0; x <= WORLD.x1; x += 100) { ctx.moveTo(x, WORLD.y0); ctx.lineTo(x, WORLD.y1); }
+    for (let y = WORLD.y0; y <= WORLD.y1; y += 100) { ctx.moveTo(WORLD.x0, y); ctx.lineTo(WORLD.x1, y); }
+    ctx.stroke();
+    ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 3; ctx.strokeRect(WORLD.x0, WORLD.y0, WORLD.x1 - WORLD.x0, WORLD.y1 - WORLD.y0);
+    ctx.fillStyle = '#20252f';
+    for (const m of marks) { ctx.save(); ctx.translate(m.pos.x, m.pos.y); ctx.rotate(m.a); ctx.fillRect(-3, -4, 6, 8); ctx.restore(); }
+    for (const r of ROCKS) circle(r.pos, r.r, '#2b3242', '#3a4357', 3);
+    for (const c of crates) {
+      const s = 1 + 0.08 * Math.sin(c.t * 5);
+      ctx.fillStyle = '#244a33'; ctx.strokeStyle = '#5fd18b'; ctx.lineWidth = 2;
+      ctx.fillRect(c.pos.x - 13 * s, c.pos.y - 13 * s, 26 * s, 26 * s); ctx.strokeRect(c.pos.x - 13 * s, c.pos.y - 13 * s, 26 * s, 26 * s);
+      ctx.fillStyle = '#5fd18b'; ctx.fillRect(c.pos.x - 3, c.pos.y - 9, 6, 18); ctx.fillRect(c.pos.x - 9, c.pos.y - 3, 18, 6);
+    }
+    for (const e of enemies) drawTank(e);
+    if (state.over !== 'lost') drawTank(player);
+    for (const s of shells) circle(s.pos, s.owner === 'player' ? 4 : 5, s.owner === 'player' ? '#ffe08a' : '#ff8a6b');
+    for (const p of parts) { ctx.globalAlpha = clamp(p.life * 2, 0, 1); circle(p.pos, 3, p.color); ctx.globalAlpha = 1; }
+    if (!settings.screenBars) {                      // bars drawn in WORLD space: they zoom and turn with the camera
+      for (const e of enemies) bar(e.pos.x - 20, e.pos.y - e.r - 14, 40, 5, e.hp / e.maxHp, '#ff6b6b');
+    }
+
+    // ---- Screen space ----
+    setT(BASE);
+    for (const l of LENSES) if (l.on && l.world) l.world();
+    if (settings.screenBars) for (const e of enemies) { const b = barPos(e); bar(b.x, b.y, 40, 5, e.hp / e.maxHp, '#ff6b6b'); }
+    for (const e of enemies) {                       // edge arrows for enemies off screen
+      const s = worldToScreen(e.pos);
+      if (onScreen(s)) continue;
+      const p = edgePoint(s), a = Math.atan2(s.y - CENTER.y, s.x - CENTER.x);
+      ctx.fillStyle = '#ff6b6b'; ctx.beginPath();
+      ctx.moveTo(p.x + Math.cos(a) * 10, p.y + Math.sin(a) * 10);
+      ctx.lineTo(p.x + Math.cos(a + 2.4) * 8, p.y + Math.sin(a + 2.4) * 8);
+      ctx.lineTo(p.x + Math.cos(a - 2.4) * 8, p.y + Math.sin(a - 2.4) * 8); ctx.fill();
+    }
+    for (const p of popups) {
+      const s = worldToScreen(p.pos);
+      ctx.globalAlpha = clamp(p.life * 1.5, 0, 1); text(p.text, s.x, s.y - 20, p.color, 14, 'center'); ctx.globalAlpha = 1;
+    }
+    // Aim point (where the game thinks you clicked) and the mouse cursor
+    if (started && !state.over) {
+      const aim = worldToScreen(state.mouseWorld);
+      circle(aim, 9, null, settings.zoomInInverse ? '#ffb547' : '#ff6b6b', 2);
+      line(V(aim.x - 13, aim.y), V(aim.x - 5, aim.y), '#ffb547', 2); line(V(aim.x + 5, aim.y), V(aim.x + 13, aim.y), '#ffb547', 2);
+      if (dist(aim, mouse.s) > 6) { line(mouse.s, aim, 'rgba(255,107,107,.7)', 1.5, [4, 4]); circle(mouse.s, 4, null, '#e6e9ef', 1.5); }
+    }
+    drawMinimap();
+    for (const l of LENSES) if (l.on && l.screen) l.screen();
+
+    // HUD
+    bar(14, 14, 160, 10, player.hp / PLAYER.hp, player.hp > 35 ? '#5fd18b' : '#ff6b6b');
+    text(`hp ${f0(player.hp)}`, 182, 24, '#e6e9ef', 13);
+    text(`wave ${state.wave + 1}/${WAVES.length}   enemies ${enemies.length}   score ${state.score}`, 14, 44, '#9aa3b2', 13);
+    text(`zoom ${f2(cam.zoom)}×   camera ${f0(deg(cam.rot))}°`, 14, 62, '#9aa3b2', 13);
+    if (state.bannerT > 0 && started) text(state.banner, CENTER.x, 110, '#ffb547', 22, 'center');
+    if (state.hurt > 0) { ctx.fillStyle = `rgba(255,60,60,${state.hurt * 0.5})`; ctx.fillRect(0, 0, VW, VH); }
+
+    if (!started) overlay('TANK COMMANDER', ['Destroy three waves of enemy tanks and gun towers',
+      'WASD to drive · aim with the mouse · click or Space to fire', 'Mouse wheel or − / + to zoom · Q / E to turn the camera', 'Press any key to start']);
+    else if (state.over === 'lost') overlay('TANK DESTROYED', [`score ${state.score} · ${state.kills} kills · ${state.time.toFixed(1)} s`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('VICTORY', [`score ${state.score} · ${state.time.toFixed(1)} s · accuracy ${f0(100 * state.hits / Math.max(1, state.shots))}%`, 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+    ctx.restore();
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, VW, VH);
+    text(title, CENTER.x, CENTER.y - 30, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, CENTER.x, CENTER.y + 2 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  function viewCorners() { return [V(0, 0), V(VW, 0), V(VW, VH), V(0, VH)].map(screenToWorld); }
+
+  function drawMinimap() {
+    const w = (WORLD.x1 - WORLD.x0) * MAP.k, h = (WORLD.y1 - WORLD.y0) * MAP.k;
+    ctx.fillStyle = 'rgba(11,13,18,.85)'; ctx.fillRect(MAP.x, MAP.y, w, h);
+    ctx.save(); ctx.beginPath(); ctx.rect(MAP.x, MAP.y, w, h); ctx.clip();
+    for (const r of ROCKS) circle(worldToMap(r.pos), Math.max(2, r.r * MAP.k), '#3a4357');
+    for (const c of crates) circle(worldToMap(c.pos), 3, '#5fd18b');
+    for (const e of enemies) circle(worldToMap(e.pos), e.kind === 'tower' ? 3.5 : 3, '#ff6b6b');
+    const pm = worldToMap(player.pos);
+    circle(pm, 3.5, '#6cb8ff');
+    line(pm, add(pm, fromAngle(player.angle, 8)), '#6cb8ff', 2);
+    const corners = viewCorners().map(worldToMap);
+    ctx.strokeStyle = '#e6e9ef'; ctx.lineWidth = 1; ctx.beginPath();
+    corners.forEach((c, i) => i ? ctx.lineTo(c.x, c.y) : ctx.moveTo(c.x, c.y)); ctx.closePath(); ctx.stroke();
+    ctx.restore();
+    ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 1.5; ctx.strokeRect(MAP.x, MAP.y, w, h);
+  }
+
+  // ---------- Lenses ----------
+  function nearestEnemy() {
+    let best = null, bd = Infinity;
+    for (const e of enemies) { const d = dist(e.pos, player.pos); if (d < bd) { bd = d; best = e; } }
+    return best;
+  }
+  function muzzleChain(t) {
+    const inBarrel = MUZZLE;
+    const inTurret = apply(barrelLocalM(t), inBarrel);
+    const inHull = apply(turretLocalM(t), inTurret);
+    const inWorld = apply(barrelWorldM(t), inBarrel);
+    return { inBarrel, inTurret, inHull, inWorld };
+  }
+  const LENSES = [
+    {
+      name: 'Hierarchy', chap: 'Chapter 16.2–16.4',
+      formula: 'world = Hull × Turret × Barrel × p\nHull   = T(pos) R(θ)\nTurret = T(−6, 0) R(α)\nBarrel = T(10, 0)\nmuzzle = (28, 0) in barrel space',
+      used: ['Turrets on tanks, ships and walkers', 'A sword in a character\'s hand, a hat on a head',
+        'Wheels on a car, rotors on a helicopter', 'Muzzle flashes, exhaust and sparks at attach points'],
+      tryThis: 'Drive in a circle while aiming at one rock: θ changes, α changes the opposite way, and the world angle θ + α stays put. Then untick "Use parent transform": every turret jumps to the world origin.',
+      controls: `<label><input type="checkbox" data-set="useParent"> Use parent transform (world = parent × local)</label>`,
+      world() {
+        const o = worldToScreen(V(0, 0));
+        arrow(o, worldToScreen(V(80, 0)), 'rgba(255,107,107,.6)', 2, 8);
+        arrow(o, worldToScreen(V(0, 80)), 'rgba(95,209,139,.6)', 2, 8);
+        text('world origin', o.x + 8, o.y - 8, '#9aa3b2', 12);
+        for (const t of [player, ...enemies]) {
+          if (t !== player && dist(t.pos, player.pos) > 500) continue;
+          axes(hullM(t), 44, t === player ? 'hull' : '');
+          if (t === player) axes(turretWorldM(t), 30, '');
+        }
+        if (state.over === 'lost') return;
+        const c = muzzleChain(player), m = worldToScreen(c.inWorld);
+        circle(m, 5, null, '#ffb547', 2);
+        text(`muzzle ${P(c.inWorld)}`, m.x + 10, m.y + 16, '#ffb547', 12);
+        if (!settings.useParent) {
+          const h = worldToScreen(apply(hullM(player), player.mount));
+          line(h, worldToScreen(apply(turretWorldM(player), V(0, 0))), '#ff6b6b', 2, [6, 5]);
+          text('turret should be here', h.x + 14, h.y - 22, '#ff6b6b', 12);
+        }
+      },
+      live() {
+        const t = player, c = muzzleChain(t);
+        return `hull    pos ${P(t.pos)}  θ = ${f0(deg(t.angle))}°\nturret  α = ${f0(deg(t.turretLocal))}° (local)\n        world angle θ + α = ${f0(deg(wrap(t.angle + t.turretLocal)))}°\nmuzzle in barrel space ${P(c.inBarrel)}\n    → turret space     ${P(c.inTurret)}\n    → hull space       ${P(c.inHull)}\n    → world            ${P(c.inWorld)}\nparent transform: ${settings.useParent ? 'ON' : 'OFF (bug)'}`;
+      },
+    },
+    {
+      name: 'Camera', chap: 'Chapter 16.5–16.6',
+      formula: 'screen = center + zoom · R(−φ)(world − cam)\nworld  = cam + R(φ)(screen − center) ÷ zoom\ncenter = (480, 300)',
+      used: ['Clicking units in a scrolled, zoomed RTS', 'Aiming with the mouse in twin-stick shooters',
+        'Zooming toward the cursor in map editors', 'Rotating cameras in top-down racers'],
+      tryThis: 'Zoom in with the wheel and untick "Include zoom in the inverse": the aim ring drifts away from the cursor, worst at the screen edges and not at all at the center.',
+      controls: `<label><input type="checkbox" data-set="zoomInInverse"> Include zoom in the inverse (÷ zoom)</label>
+        <label><input type="checkbox" data-set="followHeading"> Camera turns with the tank</label>`,
+      world() {
+        const c = V(cam.x, cam.y), cs = worldToScreen(c);
+        line(V(CENTER.x - 10, CENTER.y), V(CENTER.x + 10, CENTER.y), '#9aa3b2', 1.5);
+        line(V(CENTER.x, CENTER.y - 10), V(CENTER.x, CENTER.y + 10), '#9aa3b2', 1.5);
+        text('center (480, 300)', CENTER.x + 12, CENTER.y + 22, '#9aa3b2', 12);
+        circle(cs, 4, '#9aa3b2');
+        arrow(CENTER, mouse.s, '#6cb8ff', 2);
+        text(`s − center = (${f0(mouse.s.x - CENTER.x)}, ${f0(mouse.s.y - CENTER.y)})`, mouse.s.x + 12, mouse.s.y - 12, '#6cb8ff', 12);
+        const mw = state.mouseWorld;
+        text(`world ${P(mw)}`, mouse.s.x + 12, mouse.s.y + 6, '#ffb547', 12);
+        // camera's own axes, drawn on screen
+        const ux = fromAngle(-cam.rot, 1);
+        text(`φ = ${f0(deg(cam.rot))}°`, 14, VH - 14, '#9aa3b2', 12);
+        arrow(V(90, VH - 30), add(V(90, VH - 30), mul(ux, 40)), 'rgba(255,107,107,.8)', 2, 7);
+        arrow(V(90, VH - 30), add(V(90, VH - 30), mul(V(-ux.y, ux.x), 40)), 'rgba(95,209,139,.8)', 2, 7);
+        text('world axes', 100, VH - 60, '#9aa3b2', 11);
+      },
+      live() {
+        const s = mouse.s, d = sub(s, CENTER), z = cam.zoom;
+        const k = settings.zoomInInverse ? 1 / z : 1, q = mul(d, k);
+        const c = Math.cos(cam.rot), si = Math.sin(cam.rot), r = V(c * q.x - si * q.y, si * q.x + c * q.y);
+        const w = add(V(cam.x, cam.y), r);
+        let out = `mouse screen s  (${f0(s.x)}, ${f0(s.y)})\ns − center      (${f0(d.x)}, ${f0(d.y)})\n${settings.zoomInInverse ? `÷ zoom ${f2(z)}     ` : '÷ zoom  SKIPPED  '}${P(q)}\nrotate by φ=${f0(deg(cam.rot))}°  ${P(r)}\n+ camera        ${P(V(cam.x, cam.y))}\n= world         ${P(w)}`;
+        if (!settings.zoomInInverse) {
+          const qq = mul(d, 1 / z), rr = V(c * qq.x - si * qq.y, si * qq.x + c * qq.y), tw = add(V(cam.x, cam.y), rr);
+          out += `\ncorrect world   ${P(tw)}\nerror           ${f1(dist(tw, w))} world units`;
+        }
+        return out;
+      },
+    },
+    {
+      name: 'Screen-space UI', chap: 'Chapter 16.7',
+      formula: 'anchor = worldToScreen(unit)\nbar    = anchor + (−20, −(r·zoom + 14))\noff screen → arrow on the edge,\n  along (anchor − center)',
+      used: ['Health bars and names over units', 'Damage numbers that float up',
+        'Off-screen enemy and objective arrows', 'Speech bubbles and quest markers'],
+      tryThis: 'Zoom in and out: the bars stay 40 pixels wide. Untick "Bars in screen space" and turn the camera with Q / E: world-space bars grow, shrink and tilt.',
+      controls: `<label><input type="checkbox" data-set="screenBars"> Bars in screen space (constant size)</label>`,
+      world() {
+        for (const e of enemies) {
+          const s = worldToScreen(e.pos);
+          if (onScreen(s)) {
+            circle(s, 3, '#ffb547');
+            if (settings.screenBars) { const b = barPos(e); line(s, V(b.x + 20, b.y + 5), '#ffb547', 1, [3, 3]); }
+          } else line(CENTER, edgePoint(s), 'rgba(255,107,107,.35)', 1, [4, 5]);
+        }
+      },
+      live() {
+        const e = nearestEnemy(); if (!e) return 'no enemies right now';
+        const s = worldToScreen(e.pos), b = barPos(e);
+        return `nearest enemy (${e.kind})\n world        ${P(e.pos)}\n → screen     ${P(s)}\n on screen?   ${onScreen(s) ? 'yes' : 'no → edge arrow at ' + P(edgePoint(s))}\n bar top-left ${P(b)}\n bar size     40 × 5 px at any zoom\n zoom ${f2(cam.zoom)}×   r·zoom = ${f1(e.r * cam.zoom)} px`;
+      },
+    },
+    {
+      name: 'Minimap', chap: 'Chapter 16.8',
+      formula: 'map = (756, 12) + 0.08 × (world − (−1200, −800))\nview box = 4 screen corners\n  → world → map',
+      used: ['Minimaps and radar', 'Strategy-game overview maps you can click',
+        'World maps with a "you are here" marker', 'Fog-of-war textures'],
+      tryThis: 'Zoom out: the white view box on the minimap grows. Turn the camera with Q / E: the box turns with it, because its corners come from screen → world.',
+      world() {
+        for (const c of viewCorners().map(worldToMap)) circle(c, 2.5, '#ffb547');
+        const pm = worldToMap(player.pos);
+        line(V(MAP.x, pm.y), pm, 'rgba(108,184,255,.6)', 1, [2, 3]);
+        line(V(pm.x, MAP.y), pm, 'rgba(108,184,255,.6)', 1, [2, 3]);
+        text('screen corners → world → map', MAP.x, MAP.y + 128 + 16, '#ffb547', 11);
+        text(`tank → map ${P(pm)}`, MAP.x, MAP.y + 128 + 32, '#6cb8ff', 11);
+      },
+      live() {
+        const pm = worldToMap(player.pos), cs = viewCorners();
+        return `tank world  ${P(player.pos)}\n → map      ${P(pm)}\nview size   ${f0(VW / cam.zoom)} × ${f0(VH / cam.zoom)} world units\nview corners in world:\n (0,0)     → ${P(cs[0])}\n (960,0)   → ${P(cs[1])}\n (960,600) → ${P(cs[2])}\n (0,600)   → ${P(cs[3])}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–4 to see the coordinate spaces the game converts between every frame.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+
+  reset();
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

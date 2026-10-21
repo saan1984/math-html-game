@@ -1,0 +1,834 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sine Shooter</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls select, .controls input[type=range] { flex: 1; }
+  select { background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Sine Shooter</h1>
+    <p class="sub">Enemy formations fly sine-wave paths. Read the waves, survive the stage, and beat the boss at dawn.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Fire</b> automatic ·
+      <b>Lenses</b> keys 1–6 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Small math helpers ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dist = (a, b) => len(sub(a, b));
+  const fromAngle = (t, r = 1) => V(Math.cos(t) * r, Math.sin(t) * r);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const TAU = Math.PI * 2;
+  const DEG = Math.PI / 180;
+  const f0 = n => { const r = Math.round(n); return (r === 0 ? 0 : r).toString(); };
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const wrap360 = d => ((d % 360) + 360) % 360;
+
+  // The formula of this chapter: y = A·sin(2π·f·t + φ)
+  const wave = (A, f, t, phi = 0) => A * Math.sin(TAU * f * t + phi);
+
+  const settings = {
+    usePhase: true,     // pitfall switch: off = every ship in a formation moves in unison
+    timeSeconds: true,  // pitfall switch: off = wave clock counts frames (assumes 60 fps)
+    fps: 0,             // 0 = native refresh rate
+  };
+
+  const WORLD = { w: 1000, h: 640 };
+  const WATER = 598;                       // mean water level
+  const PLAYER_SPEED = 260, FIRE_INTERVAL = 0.14, SHOT_SPEED = 720;
+  const DAY = 120;                         // one day/night cycle, seconds
+  const WATER_A = 6, WATER_L = 200, WATER_F = 0.5;
+  const PICK_R = 11, PULSE = 0.2, PULSE_F = 1.5, BOB_A = 8, BOB_F = 0.8, PICK_DRIFT = 70, PICK_REACH = 30;
+  const BOSS_Y0 = 300, BOSS_HP = 90;
+  const BOSS_WAVES = [{ A: 120, f: 0.12 }, { A: 50, f: 0.5 }];
+  const TYPES = {
+    snake:   { n: 6, waves: [{ A: 90, f: 0.5 }], gap: 60, v: 150, dphi: -72, hp: 1, r: 15, color: '#ff6b6b', points: 100 },
+    zip:     { n: 5, waves: [{ A: 35, f: 1.5 }], gap: 40, v: 240, dphi: -90, hp: 1, r: 13, color: '#ffb547', points: 100 },
+    braid:   { n: 3, waves: [{ A: 140, f: 0.3 }], gap: 0, v: 120, dphi: 120, hp: 2, r: 16, color: '#b48cff', points: 150 },
+    row:     { n: 7, waves: [{ A: 50, f: 0.5 }], gap: 60, v: 150, dphi: -45, hp: 1, r: 15, color: '#5fd18b', points: 100 },
+    wobbler: { n: 1, waves: [{ A: 110, f: 0.2 }, { A: 35, f: 1.0 }], gap: 0, v: 55, dphi: 0, hp: 10, r: 24, color: '#6cb8ff', points: 800 },
+  };
+  const ROW_STOP = 560, ROW_HOLD = 9, ROW_EXIT = 230;
+  const SCHEDULE = [
+    [2, 'snake', 220], [8, 'braid', 330], [14, 'zip', 460], [20, 'row', 200],
+    [26, 'snake', 420], [26, 'pickup', 'power'], [32, 'braid', 300], [38, 'zip', 160], [40, 'zip', 440],
+    [46, 'wobbler', 320], [54, 'row', 420], [54, 'pickup', 'life'], [62, 'snake', 200], [64, 'snake', 430],
+    [72, 'braid', 220], [75, 'braid', 420], [82, 'zip', 300], [82, 'pickup', 'power'], [88, 'row', 300],
+    [96, 'wobbler', 320], [97, 'snake', 160], [104, 'zip', 450], [104, 'zip', 170], [112, 'braid', 320],
+    [112, 'pickup', 'life'], [119, 'warning'], [122, 'boss'],
+  ];
+  const BOSS_TIME = 122;
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-6]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { started = true; if (state.over) reset(); });
+
+  // ---------- State ----------
+  let state, player, formations, boss, shots, enemyShots, pickups, sparks, popups, stars;
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, clock: 0, next: 0, score: 0, kills: 0, lastWdt: 1 / 60 };
+    player = { pos: V(160, 320), r: 12, lives: 3, inv: 0, fireCd: 0, power: 0 };
+    formations = []; boss = null; shots = []; enemyShots = []; pickups = []; sparks = []; popups = [];
+    stars = [];
+    for (let i = 0; i < 70; i++) stars.push({ x: rand(0, WORLD.w), y: rand(0, 440), f: rand(0.3, 1.2), phi: rand(0, TAU), s: rand(0.8, 2) });
+  }
+  reset();
+
+  function popup(pos, text, color, life = 1.2) { popups.push({ pos: V(pos.x, pos.y), text, color, life }); }
+  // Explosion: sparks evenly spaced on a circle (Chapter 8)
+  function burst(p, color, n = 10) {
+    for (let i = 0; i < n; i++) sparks.push({ pos: V(p.x, p.y), vel: fromAngle(i * TAU / n, rand(90, 190)), life: 0.5, color });
+  }
+
+  const offsetAt = (F, t, phi) => F.waves.reduce((s, w) => s + wave(w.A, w.f, t, phi), 0);
+
+  function spawn(entry) {
+    const what = entry[1], arg = entry[2];
+    if (what === 'pickup') { pickups.push({ base: V(WORLD.w + 30, rand(130, 470)), pos: V(WORLD.w + 30, 300), t: 0, r: PICK_R, kind: arg }); return; }
+    if (what === 'warning') { popup(V(WORLD.w / 2, 280), 'WARNING: BOSS APPROACHING', '#ff6b6b', 2.8); return; }
+    if (what === 'boss') {
+      boss = { x: WORLD.w + 120, targetX: 820, y: BOSS_Y0, t: 0, hp: BOSS_HP, r: 46, scale: 1, fanCd: 2, wavyCd: 1.2, flash: 0, parts: [0, 0] };
+      return;
+    }
+    const T = TYPES[what];
+    const F = Object.assign({}, T, { type: what, y0: arg, t: 0, x: WORLD.w + 40, vx: -T.v, state: 'in', hold: 0, killed: 0, members: [] });
+    for (let i = 0; i < T.n; i++) F.members.push({ i, alive: true, hp: T.hp, x: F.x + i * T.gap, y: arg, phi: 0, cd: rand(1.2, 3.5), flash: 0 });
+    formations.push(F);
+  }
+
+  function enemyShot(p, vel) { enemyShots.push({ pos: V(p.x, p.y), vel, r: 5 }); }
+  function wavyShot(p, speed, A, f, phi) {
+    enemyShots.push({ pos: V(p.x, p.y), vel: V(-speed, 0), r: 5, wavy: { y0: p.y, A, f, phi, age: 0 } });
+  }
+
+  function hitPlayer() {
+    if (player.inv > 0 || state.over) return false;
+    player.lives--; player.inv = 1.6;
+    burst(player.pos, '#6cb8ff', 14);
+    popup(V(player.pos.x, player.pos.y - 26), 'HIT', '#ff6b6b');
+    if (player.lives <= 0) { state.over = 'lost'; player.lives = 0; }
+    return true;
+  }
+
+  function killMember(F, m) {
+    m.alive = false; F.killed++; state.kills++;
+    state.score += F.points;
+    burst(V(m.x, m.y), F.color, F.type === 'wobbler' ? 16 : 10);
+    if (F.killed === F.n && F.n > 1) {
+      state.score += 500;
+      popup(V(m.x, m.y - 24), 'FORMATION +500', '#5fd18b');
+    } else popup(V(m.x, m.y - 18), `+${F.points}`, '#e6e9ef', 0.7);
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 22 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    for (const s of sparks) { s.pos = add(s.pos, mul(s.vel, dt)); s.life -= dt; }
+    sparks = sparks.filter(s => s.life > 0);
+    if (state.over) return;
+
+    // The wave clock. Correct: add the real seconds Δt. Pitfall: add one frame, assumed to be 1/60 s.
+    const wdt = settings.timeSeconds ? dt : 1 / 60;
+    state.lastWdt = wdt;
+    state.time += dt;
+    state.clock += wdt;
+
+    while (state.next < SCHEDULE.length && state.time >= SCHEDULE[state.next][0]) spawn(SCHEDULE[state.next++]);
+
+    // Player
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    player.pos = add(player.pos, mul(norm(V(ix, iy)), PLAYER_SPEED * dt));
+    player.pos.x = clamp(player.pos.x, 30, 620);
+    player.pos.y = clamp(player.pos.y, 30, WATER - 24);
+    player.inv -= dt; player.power = Math.max(0, player.power - dt);
+    player.fireCd -= dt;
+    if (player.fireCd <= 0) {
+      const nose = V(player.pos.x + 16, player.pos.y);
+      const angles = player.power > 0 ? [-6, 0, 6] : [0];
+      for (const a of angles) shots.push({ pos: V(nose.x, nose.y), vel: fromAngle(a * DEG, SHOT_SPEED) });
+      player.fireCd = FIRE_INTERVAL;
+    }
+    for (const s of shots) s.pos = add(s.pos, mul(s.vel, dt));
+
+    // Formations: x moves at a steady speed, y follows y₀ + A·sin(2π·f·t + φᵢ)
+    const ramp = 1 - 0.3 * Math.min(1, state.time / 120);
+    for (const F of formations) {
+      F.t += wdt;
+      let v = F.v;
+      if (F.type === 'row') {
+        if (F.state === 'in' && F.x <= ROW_STOP) { F.state = 'hold'; F.hold = ROW_HOLD; }
+        if (F.state === 'hold') { F.hold -= dt; if (F.hold <= 0) F.state = 'out'; }
+        v = F.state === 'in' ? F.v : F.state === 'hold' ? 0 : ROW_EXIT;
+      }
+      F.vx = -v;
+      F.x -= v * dt;
+      for (const m of F.members) {
+        m.phi = settings.usePhase ? m.i * F.dphi * DEG : 0;
+        m.x = F.x + m.i * F.gap;
+        m.y = F.y0 + offsetAt(F, F.t, m.phi);
+        m.flash -= dt;
+        if (!m.alive) continue;
+        if (m.x < WORLD.w - 20 && m.x > 120) {
+          m.cd -= dt;
+          if (m.cd <= 0) {
+            if (F.type === 'wobbler') for (const a of [-14, 0, 14]) enemyShot(V(m.x - F.r, m.y), fromAngle(Math.PI + a * DEG, 240));
+            else enemyShot(V(m.x - F.r, m.y), V(-260, 0));
+            m.cd = (F.type === 'wobbler' ? 1.8 : rand(2.4, 4.8)) * ramp;
+          }
+        }
+        if (dist(V(m.x, m.y), player.pos) < F.r + player.r - 4 && hitPlayer()) { m.hp -= 3; if (m.hp <= 0) killMember(F, m); }
+      }
+    }
+    formations = formations.filter(F => F.killed < F.n && F.x + (F.n - 1) * F.gap > -60);
+
+    // Boss: the sum of two waves
+    if (boss) {
+      const b = boss;
+      b.t += wdt;
+      b.x += (b.targetX - b.x) * (1 - Math.exp(-1.5 * dt));
+      b.parts = BOSS_WAVES.map(w => wave(w.A, w.f, b.t));
+      b.y = BOSS_Y0 + b.parts[0] + b.parts[1];
+      b.scale = 1 + 0.06 * Math.sin(TAU * 0.4 * b.t);     // breathing
+      b.flash -= dt;
+      if (b.x < 900) {
+        const rage = b.hp < BOSS_HP / 2 ? 0.7 : 1;
+        b.fanCd -= dt; b.wavyCd -= dt;
+        if (b.fanCd <= 0) {
+          for (let k = -3; k <= 3; k++) enemyShot(V(b.x - 40, b.y), fromAngle(Math.PI + k * 12 * DEG, 230));
+          b.fanCd = 2.6 * rage;
+        }
+        if (b.wavyCd <= 0) {
+          for (const ph of [0, Math.PI]) wavyShot(V(b.x - 40, b.y), 220, 40, 1.0, settings.usePhase ? ph : 0);
+          b.wavyCd = 1.1 * rage;
+        }
+      }
+      if (dist(V(b.x, b.y), player.pos) < b.r * b.scale + player.r - 6) hitPlayer();
+    }
+
+    // Enemy bullets (wavy ones ride their own sine)
+    for (const e of enemyShots) {
+      e.pos.x += e.vel.x * dt;
+      if (e.wavy) { e.wavy.age += wdt; e.pos.y = e.wavy.y0 + wave(e.wavy.A, e.wavy.f, e.wavy.age, e.wavy.phi); }
+      else e.pos.y += e.vel.y * dt;
+      if (dist(e.pos, player.pos) < player.r + e.r - 3) { e.dead = true; hitPlayer(); }
+    }
+
+    // Player bullets against enemies
+    for (const s of shots) {
+      if (s.dead) continue;
+      for (const F of formations) {
+        for (const m of F.members) {
+          if (!m.alive || dist(s.pos, V(m.x, m.y)) > F.r + 4) continue;
+          s.dead = true; m.hp--; m.flash = 0.08;
+          if (m.hp <= 0) killMember(F, m);
+          break;
+        }
+        if (s.dead) break;
+      }
+      if (!s.dead && boss && dist(s.pos, V(boss.x, boss.y)) < boss.r * boss.scale + 4) {
+        s.dead = true; boss.hp--; boss.flash = 0.06;
+        if (boss.hp <= 0) {
+          burst(V(boss.x, boss.y), '#ffb547', 24); burst(V(boss.x, boss.y), '#ff6b6b', 16);
+          state.score += 5000 + player.lives * 1000;
+          boss = null; state.over = 'won';
+        }
+      }
+    }
+    const inside = p => p.x > -40 && p.x < WORLD.w + 40 && p.y > -40 && p.y < WORLD.h + 40;
+    shots = shots.filter(s => !s.dead && inside(s.pos));
+    enemyShots = enemyShots.filter(e => !e.dead && inside(e.pos));
+
+    // Pickups: bob and pulse
+    for (const p of pickups) {
+      p.t += wdt;
+      p.base.x -= PICK_DRIFT * dt;
+      p.pos = V(p.base.x, p.base.y + wave(BOB_A, BOB_F, p.t));
+      p.r = PICK_R * (1 + PULSE * Math.sin(TAU * PULSE_F * p.t));
+      if (dist(p.pos, player.pos) < PICK_REACH) {
+        p.taken = true; state.score += 50;
+        if (p.kind === 'life') { player.lives = Math.min(5, player.lives + 1); popup(V(p.pos.x, p.pos.y - 18), '+1 LIFE', '#5fd18b'); }
+        else { player.power = 12; popup(V(p.pos.x, p.pos.y - 18), 'TRIPLE SHOT', '#ffb547'); }
+      }
+    }
+    pickups = pickups.filter(p => !p.taken && p.base.x > -30);
+  }
+
+  // ---------- Day and night ----------
+  const light = c => (1 + Math.sin(TAU * c / DAY)) / 2;          // remap sin from [−1, 1] to [0, 1]
+  const sunAngle = c => TAU * c / DAY;
+  const SUN_C = V(500, 600), SUN_R = 470;
+  const sunPos = a => V(SUN_C.x - SUN_R * Math.cos(a), SUN_C.y - SUN_R * Math.sin(a));
+  function clockText(c) {
+    const h = wrap360((6 + 24 * c / DAY) * 15) / 15;
+    const hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+  const mix = (c1, c2, t) => `rgb(${c1.map((v, i) => Math.round(lerp(v, c2[i], t))).join(',')})`;
+  const waterY = (x, c) => WATER - wave(WATER_A, WATER_F, c, TAU * x / WATER_L);   // y = 598 − 6·sin(kx + ωt)
+
+  // ---------- Drawing helpers ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0.1, r), 0, TAU);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 1.5, dash) {
+    ctx.setLineDash(dash ? [6, 6] : []);
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  function arrow(from, to, color, lw = 2) {
+    const d = sub(to, from); if (len(d) < 3) return;
+    const a = Math.atan2(d.y, d.x);
+    line(from, to, color, lw);
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * 8, to.y - Math.sin(a - .4) * 8);
+    ctx.lineTo(to.x - Math.cos(a + .4) * 8, to.y - Math.sin(a + .4) * 8);
+    ctx.closePath(); ctx.fill();
+  }
+  function curve(fn, x0, x1, color, lw = 1.5, dash) {
+    ctx.setLineDash(dash ? [6, 6] : []);
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.beginPath();
+    for (let x = x0, first = true; x <= x1; x += 5, first = false) first ? ctx.moveTo(x, fn(x)) : ctx.lineTo(x, fn(x));
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  // A small oscilloscope: offset against time, y-down like the game
+  function graph(x, y, w, h, fn, t0, t1, tNow, amp, color, label) {
+    ctx.fillStyle = 'rgba(11,13,18,.85)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+    const my = y + h / 2, k = (h / 2 - 6) / amp;
+    line(V(x, my), V(x + w, my), 'rgba(154,163,178,.35)', 1);
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    for (let i = 0; i <= 120; i++) {
+      const t = t0 + (t1 - t0) * i / 120, px = x + w * i / 120, py = my + fn(t) * k;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+    const nx = x + w * (tNow - t0) / (t1 - t0);
+    line(V(nx, y), V(nx, y + h), 'rgba(230,233,239,.45)', 1);
+    circle(V(nx, my + fn(tNow) * k), 4, color);
+    text(label, x + 6, y + 14, color, 11);
+  }
+
+  // ---------- Render ----------
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, WORLD.w, WORLD.h); ctx.clip();
+
+    const L = light(state.clock);
+    ctx.fillStyle = mix([9, 12, 28], [52, 96, 140], L); ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+
+    // Stars twinkle, each with its own phase
+    for (const s of stars) {
+      const a = (1 - L) * (0.55 + 0.45 * Math.sin(TAU * s.f * state.clock + s.phi));
+      if (a <= 0.02) continue;
+      const x = ((s.x - state.time * 8) % WORLD.w + WORLD.w) % WORLD.w;
+      ctx.globalAlpha = a; circle(V(x, s.y), s.s, '#e6e9ef'); ctx.globalAlpha = 1;
+    }
+    // Sun and moon ride a circle; the sun's height is a sine
+    const sa = sunAngle(state.clock);
+    const sun = sunPos(sa), moon = sunPos(sa + Math.PI);
+    if (sun.y < WATER) circle(sun, 26, '#ffd27a');
+    if (moon.y < WATER) { circle(moon, 18, '#dfe6f2'); circle(V(moon.x + 7, moon.y - 4), 15, mix([9, 12, 28], [52, 96, 140], L)); }
+
+    // Distant hills: two sines added together, scrolling
+    const scroll = state.time * 25;
+    ctx.fillStyle = mix([16, 22, 36], [42, 78, 96], L);
+    ctx.beginPath(); ctx.moveTo(0, WATER);
+    for (let x = 0; x <= WORLD.w; x += 10) ctx.lineTo(x, 500 + 26 * Math.sin(TAU * (x + scroll) / 420) + 12 * Math.sin(TAU * (x + scroll) / 150 + 1));
+    ctx.lineTo(WORLD.w, WATER); ctx.closePath(); ctx.fill();
+
+    // Water: a traveling wave
+    ctx.fillStyle = mix([12, 32, 54], [28, 92, 130], L);
+    ctx.beginPath(); ctx.moveTo(0, WORLD.h);
+    for (let x = 0; x <= WORLD.w; x += 8) ctx.lineTo(x, waterY(x, state.clock));
+    ctx.lineTo(WORLD.w, WORLD.h); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(207,230,255,.45)'; ctx.lineWidth = 2; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 8) x ? ctx.lineTo(x, waterY(x, state.clock)) : ctx.moveTo(x, waterY(x, state.clock));
+    ctx.stroke();
+
+    // Pickups: bobbing, pulsing, glowing
+    for (const p of pickups) {
+      const glow = (1 + Math.sin(TAU * PULSE_F * p.t)) / 2;
+      const col = p.kind === 'life' ? '95,209,139' : '255,181,71';
+      circle(p.pos, p.r + 8, `rgba(${col},${0.12 + 0.25 * glow})`);
+      circle(p.pos, p.r, `rgba(${col},.9)`, '#e6e9ef', 2);
+      text(p.kind === 'life' ? '+' : 'P', p.pos.x, p.pos.y + 4, '#0f1218', 12, 'center');
+    }
+
+    // Formations
+    for (const F of formations) for (const m of F.members) {
+      if (!m.alive) continue;
+      const p = V(m.x, m.y);
+      circle(p, F.r, m.flash > 0 ? '#ffffff' : '#20202a', F.color, 3);
+      circle(V(p.x - F.r * 0.35, p.y), F.r * 0.3, F.color);
+      if (F.type === 'wobbler') circle(p, F.r + 5, null, 'rgba(108,184,255,.5)', 2);
+    }
+
+    // Boss
+    if (boss) {
+      const b = boss, p = V(b.x, b.y), r = b.r * b.scale;
+      circle(p, r + 10, 'rgba(255,107,107,.12)');
+      circle(p, r, b.flash > 0 ? '#ffffff' : '#3b1d24', '#ff6b6b', 4);
+      circle(V(p.x - r * 0.35, p.y), r * 0.28, '#ffb547');
+      for (let i = 0; i < 8; i++) circle(add(p, fromAngle(i * TAU / 8 + b.t, r * 0.72)), 4, '#ff6b6b');
+    }
+
+    // Bullets
+    ctx.fillStyle = '#cfe6ff';
+    for (const s of shots) { ctx.fillRect(s.pos.x - 7, s.pos.y - 2, 14, 4); }
+    for (const e of enemyShots) circle(e.pos, e.r, e.wavy ? '#b48cff' : '#ff9b6b');
+
+    // Player ship
+    const blink = player.inv > 0 && Math.floor(player.inv * 12) % 2 === 0;
+    if (!blink && state.over !== 'lost') {
+      const p = player.pos, flame = 8 + 3 * Math.sin(TAU * 6 * state.clock);
+      ctx.fillStyle = '#ffb547'; ctx.beginPath();
+      ctx.moveTo(p.x - 12, p.y - 4); ctx.lineTo(p.x - 12 - flame, p.y); ctx.lineTo(p.x - 12, p.y + 4); ctx.fill();
+      ctx.fillStyle = '#2a5d8f'; ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 3; ctx.beginPath();
+      ctx.moveTo(p.x + 18, p.y); ctx.lineTo(p.x - 12, p.y - 12); ctx.lineTo(p.x - 6, p.y); ctx.lineTo(p.x - 12, p.y + 12);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+
+    for (const s of sparks) { ctx.globalAlpha = clamp(s.life * 2, 0, 1); circle(s.pos, 3, s.color); ctx.globalAlpha = 1; }
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    text(`${'♥'.repeat(player.lives)}${'♡'.repeat(Math.max(0, 3 - player.lives))}`, 18, 30, '#ff6b6b', 20);
+    text(`score ${state.score}   ${clockText(state.clock)}${player.power > 0 ? `   triple shot ${f1(player.power)}s` : ''}`, 130, 28, '#e6e9ef', 13);
+    if (boss) {
+      ctx.fillStyle = '#1f2430'; ctx.fillRect(600, 16, 380, 10);
+      ctx.fillStyle = '#ff6b6b'; ctx.fillRect(600, 16, 380 * boss.hp / BOSS_HP, 10);
+      text('BOSS', 600, 42, '#ff6b6b', 12);
+    } else if (!state.over) {
+      const left = Math.max(0, BOSS_TIME - state.time);
+      ctx.fillStyle = '#1f2430'; ctx.fillRect(700, 16, 280, 6);
+      ctx.fillStyle = '#9aa3b2'; ctx.fillRect(700, 16, 280 * Math.min(1, state.time / BOSS_TIME), 6);
+      text(`boss in ${f0(left)} s`, 700, 38, '#9aa3b2', 12);
+    }
+    ctx.restore();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('SINE SHOOTER', ['Survive the formations and beat the boss', 'WASD or arrow keys to move · you fire automatically', 'Press any key to start']);
+    else if (state.over === 'lost') overlay('SHOT DOWN', [`score ${state.score} · ${state.kills} kills · ${f0(state.time)} s`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('STAGE CLEAR', [`score ${state.score} · ${state.kills} kills · ${player.lives} lives left`, 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  function nearestFormation(filter = () => true) {
+    let best = null, bd = Infinity;
+    for (const F of formations) {
+      if (!filter(F)) continue;
+      for (const m of F.members) {
+        if (!m.alive || m.x > WORLD.w) continue;
+        const d = dist(V(m.x, m.y), player.pos);
+        if (d < bd) { bd = d; best = F; }
+      }
+    }
+    return best;
+  }
+  const lead = F => F.members.find(m => m.alive);
+  const sumTarget = () => {
+    if (boss) return { name: 'boss', y0: BOSS_Y0, waves: BOSS_WAVES, t: boss.t, x: boss.x, y: boss.y };
+    const F = formations.find(f => f.type === 'wobbler' && f.members[0].alive);
+    return F ? { name: 'wobbler', y0: F.y0, waves: F.waves, t: F.t, x: F.members[0].x, y: F.members[0].y } : null;
+  };
+  const waveStr = (y0, ws) => `${y0} + ` + ws.map(w => `${w.A}·sin(2π·${w.f}·t)`).join(' + ');
+
+  const LENSES = [
+    {
+      name: 'Wave anatomy', chap: 'Chapter 10.2–10.3',
+      formula: 'y = y₀ + A·sin(2π·f·t + φ)\nA  amplitude (px)    f  frequency (Hz)\nT = 1/f  period (s)  φ  phase',
+      used: ['Enemies weaving in shoot-\'em-ups', 'Bobbing pickups and floating platforms',
+        'Pulsing buttons and glowing outlines', 'Swaying lamps, flags and sentries'],
+      tryThis: 'Compare formations: snakes swing 90 px every 2 s, zips only 35 px but 1.5 times per second. The dashed curve is the path the designer planned.',
+      draw() {
+        const F = nearestFormation(f => f.type !== 'wobbler');
+        if (!F) { text('wait for a formation', player.pos.x, player.pos.y - 30, '#9aa3b2', 12, 'center'); return; }
+        const w = F.waves[0], alive = F.members.filter(m => m.alive);
+        const xa = Math.min(...alive.map(m => m.x)) - 70, xb = Math.max(...alive.map(m => m.x)) + 70;
+        line(V(xa, F.y0), V(xb, F.y0), 'rgba(230,233,239,.6)', 1.2, true);
+        line(V(xa, F.y0 - w.A), V(xb, F.y0 - w.A), 'rgba(255,181,71,.35)', 1);
+        line(V(xa, F.y0 + w.A), V(xb, F.y0 + w.A), 'rgba(255,181,71,.35)', 1);
+        text(`y₀ = ${F.y0}`, xa, F.y0 - 6, '#e6e9ef', 12);
+        arrow(V(xb, F.y0), V(xb, F.y0 + w.A), '#ffb547'); text(`A = ${w.A}`, xb + 6, F.y0 + w.A / 2 + 4, '#ffb547', 12);
+        const m = lead(F), T = 1 / w.f;
+        // planned path of the lead ship for the next two periods: x = x_now + vx·τ, y = y₀ + A·sin(2πf(t + τ) + φ)
+        if (F.vx !== 0) curve(x => F.y0 + offsetAt(F, F.t + (x - m.x) / F.vx, m.phi), Math.max(0, m.x + F.vx * 2 * T), m.x, 'rgba(255,181,71,.8)', 1.5, true);
+        graph(690, 60, 290, 90, t => wave(w.A, w.f, t, m.phi), F.t - T, F.t + T, F.t, w.A,
+          '#ffb547', `${w.A}·sin(2π·${w.f}·t + φ)   T = ${f2(T)} s`);
+      },
+      live() {
+        const F = nearestFormation(f => f.type !== 'wobbler');
+        if (!F) return 'no formation on screen yet';
+        const w = F.waves[0], m = lead(F);
+        const ang = 360 * w.f * F.t + m.phi / DEG, s = Math.sin(ang * DEG);
+        return `formation   ${F.type} (${F.members.filter(q => q.alive).length} left)\ny = y₀ + A·sin(2π·f·t + φ)\ny₀ ${F.y0}   A ${w.A} px\nf ${f2(w.f)} Hz → T = 1/f = ${f2(1 / w.f)} s\n\nlead ship i = ${m.i}, φ = ${f0(m.phi / DEG)}°\nt = ${f2(F.t)} s\nangle = 360°·f·t + φ = ${f1(ang)}°\n      ≡ ${f1(wrap360(ang))}°\nsin = ${f2(s)} → y − y₀ = ${f1(w.A * s)}`;
+      },
+    },
+    {
+      name: 'Phase', chap: 'Chapter 10.4',
+      formula: 'ship i:  φᵢ = i × Δφ\nyᵢ = y₀ + A·sin(2π·f·t + φᵢ)\nfollow one track:  Δφ = −360°·f·gap / v',
+      used: ['Snakes and centipedes of enemies', 'Crowds and grass that don\'t sway in lockstep',
+        'Twinkling stars, flickering torches', 'Lights chasing along a sign'],
+      tryThis: 'Each dial shows the angle 2π·f·t + φᵢ on a unit circle. Untick "Use phase offset": every ship gets φ = 0 and the formation moves as one rigid block; braids stack into a single dot.',
+      controls: `<label><input type="checkbox" data-set="usePhase"> Use phase offset</label>`,
+      draw() {
+        const near = nearestFormation();
+        for (const F of formations) {
+          const w = F.waves[0];
+          for (const m of F.members) {
+            if (!m.alive) continue;
+            const c = V(m.x, m.y - F.r - 18), th = TAU * w.f * F.t + m.phi;
+            circle(c, 10, 'rgba(11,13,18,.7)', 'rgba(230,233,239,.6)', 1);
+            line(c, add(c, fromAngle(th, 10)), F.color, 1.5);
+            circle(add(c, fromAngle(th, 10)), 3, F.color);
+            if (F === near) text(`${f0(m.phi / DEG)}°`, m.x, m.y + F.r + 16, F.color, 11, 'center');
+          }
+        }
+      },
+      live() {
+        const F = nearestFormation();
+        if (!F) return 'no formation on screen yet';
+        const w = F.waves[0];
+        let s = `${F.type}: Δφ = ${settings.usePhase ? F.dphi : 0}° per ship\n i    φᵢ    angle    sin\n`;
+        for (const m of F.members) {
+          const a = wrap360(360 * w.f * F.t + m.phi / DEG);
+          s += `${String(m.i).padStart(2)} ${(f0(m.phi / DEG) + '°').padStart(5)} ${(f0(a) + '°').padStart(7)} ${f2(Math.sin(a * DEG)).padStart(6)}${m.alive ? '' : '  (down)'}\n`;
+        }
+        if (F.gap > 0 && F.type !== 'row') s += `\nshared track needs\nΔφ = −360°×${w.f}×${F.gap}/${F.v} = ${f0(-360 * w.f * F.gap / F.v)}°`;
+        return s + `\nphase offset ${settings.usePhase ? 'ON' : 'OFF (bug: unison)'}`;
+      },
+    },
+    {
+      name: 'Adding waves', chap: 'Chapter 10.5',
+      formula: 'y = y₀ + A₁·sin(2π·f₁·t) + A₂·sin(2π·f₂·t)\nboss:    300 + 120·sin(2π·0.12·t) + 50·sin(2π·0.5·t)\nwobbler: 320 + 110·sin(2π·0.2·t) + 35·sin(2π·1·t)',
+      used: ['Boss movement that never looks repetitive', 'Rolling hills and terrain from summed sines',
+        'Camera shake and engine rumble', 'Water and wind made of several waves'],
+      tryThis: 'Watch the wobbler (at 0:46 and 1:36) or the boss: the slow wave carries it up and down, the fast wave adds a wiggle on top. The hills behind are two sines added too.',
+      draw() {
+        const g = sumTarget();
+        if (!g) { text('a wobbler arrives at 46 s and 96 s; the boss at 122 s', WORLD.w / 2, 80, '#9aa3b2', 12, 'center'); return; }
+        const [w1, w2] = g.waves, span = 4;
+        const y1 = wave(w1.A, w1.f, g.t), y2 = wave(w2.A, w2.f, g.t);
+        const amp = w1.A + w2.A;
+        graph(690, 60, 290, 62, t => wave(w1.A, w1.f, t), g.t - span, g.t + span, g.t, amp, '#6cb8ff', `${w1.A}·sin(2π·${w1.f}·t)`);
+        graph(690, 126, 290, 62, t => wave(w2.A, w2.f, t), g.t - span, g.t + span, g.t, amp, '#ffb547', `${w2.A}·sin(2π·${w2.f}·t)`);
+        graph(690, 192, 290, 62, t => wave(w1.A, w1.f, t) + wave(w2.A, w2.f, t), g.t - span, g.t + span, g.t, amp, '#5fd18b', 'sum');
+        const bx = g.x - 80;
+        line(V(bx - 30, g.y0), V(bx + 30, g.y0), 'rgba(230,233,239,.6)', 1.2, true);
+        arrow(V(bx, g.y0), V(bx, g.y0 + y1), '#6cb8ff', 3);
+        arrow(V(bx, g.y0 + y1), V(bx, g.y0 + y1 + y2), '#ffb547', 3);
+        text(`y₀ = ${g.y0}`, bx - 30, g.y0 - 6, '#e6e9ef', 11, 'right');
+      },
+      live() {
+        const g = sumTarget();
+        if (!g) return 'no wobbler or boss on screen\n(wobblers at 46 s and 96 s,\n boss at 122 s)';
+        const [w1, w2] = g.waves;
+        const a1 = 360 * w1.f * g.t, a2 = 360 * w2.f * g.t;
+        const y1 = w1.A * Math.sin(a1 * DEG), y2 = w2.A * Math.sin(a2 * DEG);
+        return `${g.name}\ny = ${waveStr(g.y0, g.waves)}\nt = ${f2(g.t)} s\nwave 1 = ${w1.A}·sin(${f1(wrap360(a1))}°) = ${f1(y1)}\nwave 2 = ${w2.A}·sin(${f1(wrap360(a2))}°) = ${f1(y2)}\nsum    = ${f1(y1 + y2)}  → y = ${f1(g.y0 + y1 + y2)}\nperiods ${f2(1 / w1.f)} s and ${f2(1 / w2.f)} s`;
+      },
+    },
+    {
+      name: 'Traveling waves', chap: 'Chapter 10.6',
+      formula: 'water  y = 598 − 6·sin(k·x + ω·t)\nk = 2π/λ   ω = 2π·f   speed = ω/k = λ·f\nsin(kx − ωt) moves right, sin(kx + ωt) left',
+      used: ['Water surfaces and waving flags', 'Shockwaves and ripples',
+        'A "stadium wave" running along a row of enemies', 'Scrolling, rolling terrain'],
+      tryThis: 'Follow one crest of the water: it moves 100 px left every second. Wait for a green row: its crest runs along it at 240 px/s while each ship only moves up and down.',
+      draw() {
+        const k = TAU / WATER_L, om = TAU * WATER_F, c = state.clock;
+        // crests: k·x + ω·t = π/2 + 2πm
+        let x0 = ((Math.PI / 2 - om * c) / k) % WATER_L; if (x0 < 0) x0 += WATER_L;
+        for (let x = x0; x <= WORLD.w; x += WATER_L) {
+          line(V(x, WATER - 40), V(x, WATER - 8), 'rgba(207,230,255,.8)', 1.5);
+        }
+        const xa = x0 + WATER_L;
+        line(V(xa, WATER - 34), V(xa + WATER_L, WATER - 34), '#cfe6ff', 1.5);
+        text(`λ = ${WATER_L} px`, xa + WATER_L / 2, WATER - 40, '#cfe6ff', 12, 'center');
+        arrow(V(xa + 40, WATER - 52), V(xa - 10, WATER - 52), '#cfe6ff');
+        text(`${f0(WATER_L * WATER_F)} px/s`, xa - 14, WATER - 48, '#cfe6ff', 12, 'right');
+        for (const F of formations) {
+          const w = F.waves[0];
+          if ((F.type === 'snake' || F.type === 'zip') && F.vx !== 0) {
+            const lam = F.v / w.f;
+            curve(x => F.y0 + wave(w.A, w.f, F.t + (x - F.x) / F.vx), 0, WORLD.w, 'rgba(255,181,71,.45)', 1.2, true);
+            const m = lead(F);
+            if (m) text(`track: λ = v/f = ${f0(lam)} px`, clamp(m.x, 80, 900), F.y0 - w.A - 14, F.color, 11, 'center');
+          }
+          if (F.type === 'row' && settings.usePhase) {
+            // crest, the highest point on a y-down screen (sin = −1): 2π·f·t − k·(x − x₀) = −π/2 + 2πm
+            const kk = -F.dphi * DEG / F.gap, xs = F.x, xe = F.x + (F.n - 1) * F.gap;
+            let xc = xs + ((TAU * w.f * F.t + Math.PI / 2) / kk);
+            xc = xs + (((xc - xs) % (TAU / kk)) + TAU / kk) % (TAU / kk);
+            for (let x = xc; x <= xe + 1; x += TAU / kk) {
+              arrow(V(x - 20, F.y0 - w.A - 34), V(x + 20, F.y0 - w.A - 34), F.color);
+              text('crest', x, F.y0 - w.A - 42, F.color, 11, 'center');
+            }
+          }
+        }
+      },
+      live() {
+        const k = TAU / WATER_L, om = TAU * WATER_F;
+        let s = `water\n λ = ${WATER_L} px   k = 2π/λ = ${k.toFixed(4)} rad/px\n f = ${WATER_F} Hz   ω = 2πf = ${f2(om)} rad/s\n speed = ω/k = λ·f = ${f0(om / k)} px/s (left)`;
+        const r = formations.find(F => F.type === 'row');
+        if (r) {
+          const lam = 360 / Math.abs(r.dphi) * r.gap;
+          s += settings.usePhase ? `\n\nrow: Δφ = ${r.dphi}° per ${r.gap} px\n λ = 360°/45° × 60 = ${f0(lam)} px\n speed = λ·f = ${f0(lam * r.waves[0].f)} px/s (right)` : '\n\nrow: phase off → no traveling wave';
+        }
+        const sn = formations.find(F => F.type === 'snake' || F.type === 'zip');
+        if (sn) s += `\n\n${sn.type}: track is a wave in space\n λ = v/f = ${sn.v}/${sn.waves[0].f} = ${f0(sn.v / sn.waves[0].f)} px`;
+        return s;
+      },
+    },
+    {
+      name: 'Pulse & light', chap: 'Chapter 10.7–10.8',
+      formula: 'pickup  r = 11·(1 + 0.2·sin(2π·1.5·t))\n        y = base + 8·sin(2π·0.8·t)\nlight   L = (1 + sin(2π·t / 120)) / 2',
+      used: ['Pulsing pickups, buttons and "press start"', 'Idle breathing animations',
+        'Day/night cycles and flickering lights', 'Heartbeat screen effects at low health'],
+      tryThis: 'Watch a pickup: its radius swings between 8.8 and 13.2 px while it bobs 8 px up and down. The sky follows L: noon at 30 s, midnight at 90 s. The boss breathes too: scale 1 + 0.06·sin(2π·0.4·t).',
+      draw() {
+        for (const p of pickups) {
+          ctx.setLineDash([3, 4]);
+          circle(p.pos, PICK_R * (1 - PULSE), null, 'rgba(230,233,239,.6)', 1);
+          circle(p.pos, PICK_R * (1 + PULSE), null, 'rgba(230,233,239,.6)', 1);
+          ctx.setLineDash([]);
+          line(V(p.base.x - 30, p.base.y), V(p.base.x + 30, p.base.y), 'rgba(230,233,239,.6)', 1, true);
+          text(`r = ${f1(p.r)}`, p.pos.x + 22, p.pos.y - 8, '#e6e9ef', 11);
+          text(`bob ${f1(p.pos.y - p.base.y)}`, p.pos.x + 22, p.pos.y + 8, '#e6e9ef', 11);
+        }
+        const a = sunAngle(state.clock), sun = sunPos(a);
+        ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(255,210,122,.45)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(SUN_C.x, SUN_C.y, SUN_R, Math.PI, TAU); ctx.stroke(); ctx.setLineDash([]);
+        if (sun.y < WATER) { line(SUN_C, sun, 'rgba(255,210,122,.7)', 1.5); text(`sin = ${f2(Math.sin(a))}`, sun.x + 32, sun.y + 4, '#ffd27a', 12); }
+        const L = light(state.clock);
+        ctx.fillStyle = 'rgba(11,13,18,.85)'; ctx.fillRect(18, 52, 170, 30);
+        ctx.fillStyle = '#ffd27a'; ctx.fillRect(24, 66, 158 * L, 10);
+        text(`light L = ${f2(L)}`, 24, 63, '#ffd27a', 11);
+      },
+      live() {
+        const c = state.clock, a = 360 * c / DAY, L = light(c);
+        const p = pickups[0];
+        let s = `clock t = ${f1(c)} s   (day = ${DAY} s)\nangle 360°·t/120 = ${f1(wrap360(a))}°\nsin = ${f2(Math.sin(a * DEG))}\nL = (1 + sin)/2 = ${f2(L)}\ntime of day ${clockText(c)}`;
+        if (p) s += `\n\npickup t = ${f2(p.t)} s\n r = 11·(1 + 0.2·sin(…)) = ${f1(p.r)}\n bob = 8·sin(2π·0.8·t) = ${f1(p.pos.y - p.base.y)}`;
+        else s += '\n\n(no pickup on screen)';
+        return s;
+      },
+    },
+    {
+      name: 'Frame rate', chap: 'Chapter 10.9',
+      formula: 'correct:  t ← t + Δt          (seconds)\npitfall:  t ← t + 1/60        (one frame)\nwave speed × (frames per second ÷ 60)',
+      used: ['Animations that must look the same on every screen', 'Bobbing and pulsing on 60, 120 and 144 Hz displays',
+        'Replays and networked games that must agree', 'Slow motion: scale Δt, not the frame count'],
+      tryThis: 'Set the frame rate to 15, then untick "Time in seconds": the waves crawl at a quarter speed and the snakes leave their track. On a 120 or 144 Hz screen, "native" makes them race instead.',
+      controls: `<label><input type="checkbox" data-set="timeSeconds"> Time in seconds (use Δt)</label>
+        <label>Frame rate <select data-set="fps"><option value="0">native</option><option value="60">60 fps</option><option value="30">30 fps</option><option value="15">15 fps</option></select></label>`,
+      draw() {
+        const ratio = state.lastWdt / Math.max(lastDt, 1e-6);
+        text(`${f0(fpsShown)} fps · Δt ${f1(lastDt * 1000)} ms · wave clock +${f1(state.lastWdt * 1000)} ms per frame · waves at ${f2(ratio)}× speed`,
+          WORLD.w / 2, WORLD.h - 12, ratio > 0.97 && ratio < 1.03 ? '#5fd18b' : '#ff6b6b', 12, 'center');
+      },
+      live() {
+        const ratio = state.lastWdt / Math.max(lastDt, 1e-6);
+        const f = TYPES.snake.waves[0].f;
+        return `frame rate      ${f0(fpsShown)} fps\nreal Δt         ${f1(lastDt * 1000)} ms\nwave clock step ${f1(state.lastWdt * 1000)} ms ${settings.timeSeconds ? '(= Δt)' : '(fixed 1/60!)'}\nwaves run at    ${f2(ratio)}× speed\n\nsnake: f = ${f} Hz, T = ${f2(1 / f)} s\n looks like f = ${f2(f * ratio)} Hz,\n T = ${f2(1 / (f * ratio))} s`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–6 to see the sine waves behind every formation.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), acc = 0, lastDt = 1 / 60, fpsShown = 60, liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    let dt = (now - last) / 1000;
+    last = now;
+    if (settings.fps > 0) {               // simulate a slower display
+      acc += dt;
+      if (acc < 1 / settings.fps - 0.002) return;
+      dt = acc; acc = 0;
+    }
+    dt = Math.min(dt, 0.1);
+    lastDt = dt;
+    fpsShown += (1 / Math.max(dt, 1e-4) - fpsShown) * 0.1;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

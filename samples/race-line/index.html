@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Race Line</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Race Line</h1>
+    <p class="sub">Five laps against three AI drivers. Every AI decides "left or right?" with one cross product.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Accelerate</b> W / ↑ · <b>Brake</b> S / ↓ · <b>Steer</b> A D / ← → ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dot = (a, b) => a.x * b.x + a.y * b.y;
+  const cross = (a, b) => a.x * b.y - a.y * b.x;          // 2D cross product (perp-dot)
+  const dist = (a, b) => len(sub(a, b));
+  const lerpV = (a, b, t) => V(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+  const fromAngle = (t, r = 1) => V(Math.cos(t) * r, Math.sin(t) * r);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f0 = n => Math.round(n).toString();
+  const s2 = n => (Math.abs(n) < 0.005 ? ' 0.00' : (n < 0 ? '−' : '+') + Math.abs(n).toFixed(2));
+  const s0 = n => (Math.abs(n) < 0.5 ? '0' : (n < 0 ? '−' : '+') + Math.abs(Math.round(n)));
+  const deg = r => r * 180 / Math.PI;
+  const side = c => (c > 0.005 ? 'RIGHT' : c < -0.005 ? 'LEFT' : 'dead ahead/behind');
+
+  const settings = {
+    assumeYUp: false,  // the classic pitfall when true: reads "cross > 0" as LEFT
+    useAngle: true,    // steer by the signed angle atan2(cross, dot), not just the sign
+    torque: true,      // bumps spin cars by τ = r × J
+  };
+
+  // ---------- Constants ----------
+  const WORLD = { w: 1200, h: 760 };
+  const HW = 58;                       // half the track width
+  const LAPS = 5;
+  const PLAYER_MAX = 230;              // top speed, units per second
+  const AI_MAX = [216, 210, 204];
+  const ACCEL = 200, BRAKE = 420, COAST = 60, REVERSE = 90;
+  const TURN = 2.6;                    // radians per second at full lock
+  const GRASS = 0.5;                   // top speed multiplier off the track
+  const STEER_FULL = 20 * Math.PI / 180;   // AI uses full lock when |θ| ≥ 20°
+  const REACH = 90;                    // AI switches to the next waypoint inside this distance
+  const SLIP_LEN = 150, SLIP_HALF = 35, SLIP_MAX = 1.12, SLIP_ACC = 1.5;
+  const CAR_R = 9, CAR_OFF = 9;        // each car = two circles, front and rear
+  const SPIN_I = 300, SPIN_DECAY = 2.5, RESTITUTION = 0.4;
+  const CPT = 20, CPW = HW + 10;       // checkpoint half-thickness and half-width
+
+  // ---------- Track ----------
+  const WP = [V(240, 110), V(600, 110), V(880, 110), V(1050, 150), V(1110, 290), V(1050, 410), V(880, 420),
+    V(770, 480), V(780, 600), V(680, 670), V(560, 600), V(440, 670), V(220, 650), V(110, 540), V(190, 420),
+    V(115, 300), V(160, 180)];
+  const N = WP.length;
+  const wpNormal = WP.map((p, i) => { const t = norm(sub(WP[(i + 1) % N], WP[(i + N - 1) % N])); return V(-t.y, t.x); });
+  const wpTurn = WP.map((p, i) => {
+    const a = sub(p, WP[(i + N - 1) % N]), b = sub(WP[(i + 1) % N], p);
+    return Math.atan2(cross(a, b), dot(a, b));             // signed corner angle
+  });
+  // Checkpoints: [segment, fraction along it]. Each one is a convex quad across the track.
+  const CPDEF = [[0, 0.25], [3, 0.5], [7, 0.5], [9, 0.5], [13, 0.5]];
+  const CPS = CPDEF.map(([s, f]) => {
+    const a = WP[s], b = WP[(s + 1) % N], c = lerpV(a, b, f), t = norm(sub(b, a)), n = V(-t.y, t.x);
+    const A = mul(t, CPT), B = mul(n, CPW);
+    return { c, t, quad: [sub(sub(c, A), B), sub(add(c, A), B), add(add(c, A), B), add(sub(c, A), B)] };
+  });
+  const K = CPS.length;
+
+  function closestOnSeg(p, a, b) {
+    const ab = sub(b, a);
+    const t = clamp(dot(sub(p, a), ab) / dot(ab, ab), 0, 1);
+    return add(a, mul(ab, t));
+  }
+  function trackDist(p) {
+    let best = Infinity;
+    for (let i = 0; i < N; i++) best = Math.min(best, dist(p, closestOnSeg(p, WP[i], WP[(i + 1) % N])));
+    return best;
+  }
+  // Inside a convex polygon: every edge cross product has the same sign
+  function edgeCrosses(p, poly) {
+    return poly.map((a, i) => cross(sub(poly[(i + 1) % poly.length], a), sub(p, a)));
+  }
+  function insideConvex(p, poly) {
+    const cs = edgeCrosses(p, poly);
+    return cs.every(c => c >= 0) || cs.every(c => c <= 0);
+  }
+  function slipTri(c) {
+    const f = fromAngle(c.h), s = V(-f.y, f.x);
+    const A = sub(c.pos, mul(f, 17)), back = sub(A, mul(f, SLIP_LEN));
+    return [A, add(back, mul(s, SLIP_HALF)), sub(back, mul(s, SLIP_HALF))];
+  }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { started = true; if (state.over) reset(); });
+
+  // ---------- State ----------
+  let state, cars, player, hits, popups, best = null;
+  let started = false, paused = false;
+
+  function makeCar(x, y, o) {
+    return Object.assign({ pos: V(x, y), h: 0, s: 0, w: 0, k: V(), steer: 0, throttle: 0, cp: 0, next: 1, idx: 1,
+      finished: false, place: 0, offTrack: false, slip: false, cross: 0, dotv: 1, theta: 0, tgt: V(x, y), offset: 0 }, o);
+  }
+  function reset() {
+    state = { over: null, time: 0, countdown: 3, finishCount: 0 };
+    player = makeCar(385, 132, { name: 'You', color: '#6cb8ff', body: '#2a5d8f', ai: false, max: PLAYER_MAX });
+    cars = [
+      makeCar(440, 88, { name: 'Amber', color: '#ffb547', body: '#6e4a1c', ai: true, max: AI_MAX[0], offset: -14 }),
+      makeCar(440, 132, { name: 'Violet', color: '#b48cff', body: '#4a3570', ai: true, max: AI_MAX[1], offset: 14 }),
+      makeCar(385, 88, { name: 'Mint', color: '#5fd18b', body: '#245a3c', ai: true, max: AI_MAX[2], offset: 0 }),
+      player,
+    ];
+    hits = []; popups = [];
+  }
+  reset();
+
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.4 }); }
+
+  // ---------- AI: left or right? ----------
+  function targetPoint(c) { return add(WP[c.idx], mul(wpNormal[c.idx], c.offset)); }
+  function aiDrive(c) {
+    let tgt = targetPoint(c);
+    const along = dot(sub(c.pos, WP[c.idx]), norm(sub(WP[(c.idx + 1) % N], WP[(c.idx + N - 1) % N])));
+    if (dist(c.pos, tgt) < REACH || (along > 0 && dist(c.pos, tgt) < 200)) { c.idx = (c.idx + 1) % N; tgt = targetPoint(c); }
+    c.tgt = tgt;
+    const f = fromAngle(c.h), d = norm(sub(tgt, c.pos));
+    c.cross = cross(f, d);                       // > 0: target is to the RIGHT on a y-down screen
+    c.dotv = dot(f, d);
+    c.theta = Math.atan2(c.cross, c.dotv);       // signed angle, −180°…180°
+    let steer = settings.useAngle ? clamp(c.theta / STEER_FULL, -1, 1) : Math.sign(c.cross);
+    if (settings.assumeYUp) steer = -steer;      // "positive means left" is only true when y points up
+    c.steer = steer;
+    // Slow down for sharp corners ahead and for big steering angles
+    const near = 1 - clamp(dist(c.pos, WP[c.idx]) / 240, 0, 1);
+    const corner = Math.min(1, Math.abs(wpTurn[c.idx]) / (Math.PI / 2));
+    const vt = c.max * (1 - 0.5 * corner * near) * (1 - 0.45 * Math.min(1, Math.abs(c.theta) / (Math.PI / 3)));
+    c.throttle = c.s < vt - 5 ? 1 : c.s > vt + 15 ? -1 : 0;
+  }
+
+  // ---------- Car physics ----------
+  function physics(c, dt) {
+    const f = fromAngle(c.h);
+    c.offTrack = trackDist(c.pos) > HW;
+    const max = c.max * (c.offTrack ? GRASS : 1) * (c.slip ? SLIP_MAX : 1);
+    const acc = ACCEL * (c.slip ? SLIP_ACC : 1);
+    if (c.throttle > 0) { if (c.s < max) c.s = Math.min(max, c.s + acc * dt); }
+    else if (c.throttle < 0) c.s = c.s > 0 ? Math.max(0, c.s - BRAKE * dt) : Math.max(-REVERSE, c.s - ACCEL * 0.5 * dt);
+    else c.s -= Math.sign(c.s) * Math.min(Math.abs(c.s), COAST * dt);
+    if (c.s > max) c.s = Math.max(max, c.s - 380 * dt);
+    const grip = clamp(Math.abs(c.s) / 120, 0, 1) * (c.s < 0 ? -1 : 1);
+    c.h += c.steer * TURN * grip * dt;           // steer +1 turns clockwise on screen = right
+    c.h += c.w * dt;                             // spin from bumps
+    c.w *= Math.exp(-SPIN_DECAY * dt);
+    if (Math.abs(c.w) > 1.2) c.s *= Math.exp(-0.9 * dt);
+    c.k = mul(c.k, Math.exp(-4 * dt));
+    c.pos = add(c.pos, mul(add(mul(f, c.s), c.k), dt));
+    c.pos.x = clamp(c.pos.x, 15, WORLD.w - 15); c.pos.y = clamp(c.pos.y, 15, WORLD.h - 15);
+  }
+  function circlesOf(c) { const f = fromAngle(c.h, CAR_OFF); return [add(c.pos, f), sub(c.pos, f)]; }
+  function applyImpulse(c, J, p) {
+    const f = fromAngle(c.h), along = dot(J, f);
+    c.s += along;
+    c.k = add(c.k, sub(J, mul(f, along)));
+    const r = sub(p, c.pos);
+    const tau = cross(r, J);                     // torque (angular impulse): τ = r × J
+    const dw = settings.torque ? tau / SPIN_I : 0;
+    c.w += dw;
+    return { car: c, p, r, J, tau, dw };
+  }
+  function collide(A, B) {
+    for (const ca of circlesOf(A)) for (const cb of circlesOf(B)) {
+      const d = sub(cb, ca), L = len(d);
+      if (L >= 2 * CAR_R || L === 0) continue;
+      const n = mul(d, 1 / L), over = 2 * CAR_R - L;
+      A.pos = sub(A.pos, mul(n, over / 2)); B.pos = add(B.pos, mul(n, over / 2));
+      const vA = add(mul(fromAngle(A.h), A.s), A.k), vB = add(mul(fromAngle(B.h), B.s), B.k);
+      const vrel = dot(sub(vB, vA), n);
+      if (vrel >= 0) return;
+      const j = -(1 + RESTITUTION) * vrel / 2;
+      const m = lerpV(ca, cb, 0.5);
+      const hb = applyImpulse(B, mul(n, j), m), ha = applyImpulse(A, mul(n, -j), m);
+      if (A === player || B === player || !hits.length || state.time - hits.time > 2) { hits = [ha, hb]; hits.time = state.time; }
+      for (const h of [ha, hb]) if (Math.abs(h.dw) > 1.3) popup(V(h.car.pos.x, h.car.pos.y - 22), 'SPIN!', '#ff6b6b');
+      return;
+    }
+  }
+
+  function checkpoints(c) {
+    if (!insideConvex(c.pos, CPS[c.next].quad)) return;
+    c.cp++; c.next = (c.next + 1) % K;
+    if (c === player && c.cp % K === 0 && c.cp < LAPS * K) popup(V(c.pos.x, c.pos.y - 24), `LAP ${c.cp / K + 1}`, '#6cb8ff');
+    if (c.cp >= LAPS * K && !c.finished) {
+      c.finished = true; c.place = ++state.finishCount; c.time = state.time;
+      if (c === player) {
+        state.over = 'finished';
+        if (best === null || state.time < best) best = state.time;
+      }
+    }
+  }
+  function progress(c) {
+    if (c.finished) return 1e6 - c.place;
+    const prev = CPS[(c.next + K - 1) % K].c, nxt = CPS[c.next].c;
+    return c.cp + 1 - clamp(dist(c.pos, nxt) / dist(prev, nxt), 0, 1);
+  }
+  function position(c) { const p = progress(c); return 1 + cars.filter(o => o !== c && progress(o) > p).length; }
+  const ordinal = n => n + (['th', 'st', 'nd', 'rd'][n] || 'th');
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 22 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (state.over) return;
+    if (state.countdown > 0) {
+      state.countdown -= dt;
+      if (state.countdown <= 0) popup(V(player.pos.x, player.pos.y - 26), 'GO!', '#5fd18b');
+      return;
+    }
+    state.time += dt;
+    player.throttle = (keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0);
+    player.steer = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    player.slip = false;
+    for (const c of cars) if (c.ai && c.s > 60 && insideConvex(player.pos, slipTri(c))) player.slip = true;
+    // The player's own "which way is the next checkpoint?" — same cross product as the AI
+    const pf = fromAngle(player.h), pd = norm(sub(CPS[player.next].c, player.pos));
+    player.cross = cross(pf, pd); player.dotv = dot(pf, pd); player.theta = Math.atan2(player.cross, player.dotv);
+    for (const c of cars) if (c.ai) aiDrive(c);
+    for (const c of cars) physics(c, dt);
+    for (let i = 0; i < cars.length; i++) for (let j = i + 1; j < cars.length; j++) collide(cars[i], cars[j]);
+    for (const c of cars) checkpoints(c);
+  }
+
+  // ---------- Drawing ----------
+  function arrow(from, vec, color, label, lw = 2.5) {
+    const to = add(from, vec);
+    if (len(vec) < 2) return;
+    const a = Math.atan2(vec.y, vec.x);
+    ctx.strokeStyle = ctx.fillStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * 9, to.y - Math.sin(a - .4) * 9);
+    ctx.lineTo(to.x - Math.cos(a + .4) * 9, to.y - Math.sin(a + .4) * 9);
+    ctx.closePath(); ctx.fill();
+    if (label) text(label, to.x + 5, to.y - 5, color, 12);
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function poly(pts, fill, stroke, lw = 1.5) {
+    ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function trackPath() {
+    ctx.beginPath(); WP.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath();
+  }
+  function drawCar(c) {
+    ctx.save(); ctx.translate(c.pos.x, c.pos.y); ctx.rotate(c.h);
+    ctx.beginPath(); ctx.moveTo(-17, -9); ctx.lineTo(13, -9); ctx.lineTo(17, -5); ctx.lineTo(17, 5); ctx.lineTo(13, 9);
+    ctx.lineTo(-17, 9); ctx.closePath();
+    ctx.fillStyle = c.body; ctx.fill(); ctx.strokeStyle = c.color; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.fillStyle = c.color; ctx.fillRect(2, -6, 6, 12);
+    ctx.fillStyle = 'rgba(10,12,16,.6)'; ctx.fillRect(-12, -6, 9, 12);
+    ctx.restore();
+  }
+  function signedArc(c, dir, theta, r, color) {
+    const a0 = c.h, a1 = c.h + theta;
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(c.pos.x, c.pos.y, r, a0, a1, theta < 0); ctx.stroke();
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+
+    // Grass and track
+    ctx.fillStyle = '#13241a'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#17291e'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, WORLD.h); }
+    for (let y = 0; y <= WORLD.h; y += 40) { ctx.moveTo(0, y); ctx.lineTo(WORLD.w, y); }
+    ctx.stroke();
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    trackPath(); ctx.strokeStyle = '#d9dde4'; ctx.lineWidth = 2 * HW + 8; ctx.stroke();
+    ctx.setLineDash([16, 16]); trackPath(); ctx.strokeStyle = '#c4473f'; ctx.stroke(); ctx.setLineDash([]);
+    trackPath(); ctx.strokeStyle = '#2b313d'; ctx.lineWidth = 2 * HW; ctx.stroke();
+    ctx.setLineDash([18, 18]); trackPath(); ctx.strokeStyle = '#3d4556'; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]);
+    ctx.lineJoin = 'miter'; ctx.lineCap = 'butt';
+
+    // Start / finish line (checkered) and checkpoints
+    const s0c = CPS[0];
+    for (let i = 0; i < 12; i++) for (let j = 0; j < 2; j++) {
+      ctx.fillStyle = (i + j) % 2 ? '#e6e9ef' : '#1f2430';
+      const p = add(add(s0c.c, mul(V(-s0c.t.y, s0c.t.x), -HW + i * (2 * HW / 12))), mul(s0c.t, -6 + j * 6));
+      ctx.fillRect(p.x, p.y, 6, 2 * HW / 12);
+    }
+    CPS.forEach((cp, i) => {
+      const isNext = i === player.next && !state.over;
+      poly(cp.quad, isNext ? 'rgba(255,209,102,.16)' : null, isNext ? 'rgba(255,209,102,.8)' : 'rgba(230,233,239,.12)', isNext ? 2 : 1);
+    });
+
+    // Slipstream streaks for the player
+    if (player.slip) for (let i = 0; i < 4; i++) {
+      const f = fromAngle(player.h), s = V(-f.y, f.x), o = (i - 1.5) * 6, l = 18 + 10 * Math.sin(state.time * 30 + i);
+      const a = add(sub(player.pos, mul(f, 20)), mul(s, o));
+      ctx.strokeStyle = 'rgba(108,184,255,.6)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(a.x - f.x * l, a.y - f.y * l); ctx.stroke();
+    }
+
+    for (const c of cars) drawCar(c);
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 15, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    const lap = Math.min(LAPS, Math.floor(player.cp / K) + 1);
+    text(`lap ${lap}/${LAPS}   position ${ordinal(player.finished ? player.place : position(player))} of 4   time ${state.time.toFixed(1)} s   speed ${f0(Math.abs(player.s))}${player.slip ? '   SLIPSTREAM +12%' : ''}${player.offTrack ? '   GRASS' : ''}`,
+      20, 30, '#9aa3b2', 14);
+    if (best !== null) text(`best ${best.toFixed(1)} s`, WORLD.w - 20, 30, '#9aa3b2', 14, 'right');
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('RACE LINE', [`${LAPS} laps. Pass every yellow checkpoint in order.`, 'W/↑ accelerate · S/↓ brake · A D / ← → steer', 'Tuck in behind a car for a slipstream boost', 'Press any key to start']);
+    else if (state.over === 'finished') overlay(`${ordinal(player.place).toUpperCase()} PLACE`, [`${LAPS} laps in ${state.time.toFixed(1)} s`, player.place === 1 ? 'You beat all three AI drivers!' : 'The AI drivers steer by cross product. Can you out-drive it?', 'Press R or click to race again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+    else if (state.countdown > 0) text(String(Math.ceil(state.countdown)), W / 2, H / 2, '#ffd166', 48, 'center');
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const ais = () => cars.filter(c => c.ai);
+  function nearestAI() {
+    let bestC = null, bd = Infinity;
+    for (const c of ais()) { const d = dist(c.pos, player.pos); if (d < bd) { bd = d; bestC = c; } }
+    return bestC;
+  }
+  const LENSES = [
+    {
+      name: 'Left or right?', chap: 'Chapter 13.2–13.3',
+      formula: 'f̂ × d̂ = fx·dy − fy·dx\ny-down screen: > 0 → target to the RIGHT\n               < 0 → target to the LEFT\n(on a y-up graph it is the other way round)',
+      used: ['AI drivers and pilots choosing which way to steer', 'Homing missiles turning toward a target',
+        'Turrets choosing the shorter way to rotate', 'Navigation arrows: "turn left / turn right"'],
+      tryThis: 'Tick "Assume y-up". The AI now reads a positive cross product as LEFT (true on a math graph, wrong on a y-down screen), and every car steers away from its target.',
+      controls: `<label><input type="checkbox" data-set="assumeYUp"> Assume y-up (the sign-flip bug)</label>`,
+      draw() {
+        for (const c of ais()) {
+          ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(108,184,255,.5)'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(c.pos.x, c.pos.y); ctx.lineTo(c.tgt.x, c.tgt.y); ctx.stroke(); ctx.setLineDash([]);
+          circle(c.tgt, 5, null, '#6cb8ff', 2);
+          arrow(c.pos, fromAngle(c.h, 46), '#ffb547', 'f̂');
+          arrow(c.pos, mul(norm(sub(c.tgt, c.pos)), 46), '#6cb8ff', 'd̂');
+          const wrong = settings.assumeYUp;
+          text(`f̂×d̂ = ${s2(c.cross)} → ${wrong ? (c.cross > 0 ? 'LEFT?' : 'RIGHT?') : side(c.cross)}`, c.pos.x, c.pos.y + 30,
+            wrong ? '#ff6b6b' : '#e6e9ef', 12, 'center');
+        }
+        arrow(player.pos, fromAngle(player.h, 46), '#ffb547', 'f̂');
+        arrow(player.pos, mul(norm(sub(CPS[player.next].c, player.pos)), 46), '#ffd166', 'd̂');
+        text(`checkpoint ${side(player.cross)}`, player.pos.x, player.pos.y + 30, '#ffd166', 12, 'center');
+      },
+      live() {
+        const c = nearestAI(); if (!c) return '';
+        const f = fromAngle(c.h), d = norm(sub(c.tgt, c.pos));
+        const says = settings.assumeYUp ? (c.cross > 0 ? 'LEFT' : 'RIGHT') + '  (WRONG on y-down)' : side(c.cross);
+        return `nearest AI: ${c.name}\n f̂ = (${f2(f.x)}, ${f2(f.y)})\n d̂ = (${f2(d.x)}, ${f2(d.y)})\n f̂×d̂ = ${f2(f.x)}×${f2(d.y)} − ${f2(f.y)}×${f2(d.x)}\n      = ${s2(c.cross)}\n AI reads: ${says}\n steer input ${s2(c.steer)}  (+1 = right)\n\nyou → next checkpoint\n f̂×d̂ = ${s2(player.cross)} → ${side(player.cross)}`;
+      },
+    },
+    {
+      name: 'Signed angle', chap: 'Chapter 13.4',
+      formula: 'θ = atan2(f̂ × d̂, f̂ · d̂)     −180°…180°\nsteer = clamp(θ ÷ 20°, −1, 1)\ncross: which way · dot: in front or behind',
+      used: ['Turning the shortest way, with a turn-rate limit', 'Smooth proportional steering for cars, ships, drones',
+        'Aim assist that eases toward the target', 'Leaning a character or bike into a turn'],
+      tryThis: 'Untick "Steer by angle". The AI now knows only the sign of f̂ × d̂, so it slams the wheel to full lock one way or the other and weaves down every straight.',
+      controls: `<label><input type="checkbox" data-set="useAngle"> Steer by angle (atan2 of cross and dot)</label>`,
+      draw() {
+        for (const c of ais()) {
+          signedArc(c, null, c.theta, 34, '#ffd166');
+          arrow(c.pos, fromAngle(c.h, 46), '#ffb547', null, 2);
+          arrow(c.pos, mul(norm(sub(c.tgt, c.pos)), 46), '#6cb8ff', null, 2);
+          text(`θ = ${s0(deg(c.theta))}°  steer ${s2(c.steer)}`, c.pos.x, c.pos.y - 26, '#ffd166', 12, 'center');
+        }
+      },
+      live() {
+        const c = nearestAI(); if (!c) return '';
+        return `nearest AI: ${c.name}\n f̂ · d̂  (cos θ)  ${s2(c.dotv)}  ${c.dotv >= 0 ? 'in front' : 'behind'}\n f̂ × d̂  (sin θ)  ${s2(c.cross)}  ${side(c.cross)}\n θ = atan2(${s2(c.cross)}, ${s2(c.dotv)})\n   = ${s0(deg(c.theta))}°\n steer = ${settings.useAngle ? `clamp(${s0(deg(c.theta))}° ÷ 20°)` : 'sign(f̂ × d̂)'}\n       = ${s2(c.steer)}\n speed ${f0(c.s)} / ${c.max}`;
+      },
+    },
+    {
+      name: 'Checkpoints', chap: 'Chapter 13.6',
+      formula: 'edges eᵢ = vᵢ₊₁ − vᵢ\np inside a convex polygon if every\n  eᵢ × (p − vᵢ) has the same sign',
+      used: ['Checkpoints and finish lines in racing games', 'Trigger zones for doors, traps and cutscenes',
+        'Clicking a polygon-shaped button or map region', 'Capture zones in multiplayer modes'],
+      tryThis: 'Drive through the yellow checkpoint and watch the four numbers: they are all positive only while your car is inside it. Skip a checkpoint and your lap does not count.',
+      draw() {
+        const q = CPS[player.next].quad, cs = edgeCrosses(player.pos, q);
+        q.forEach((v, i) => {
+          const nx = q[(i + 1) % 4];
+          arrow(v, mul(sub(nx, v), 0.92), cs[i] >= 0 ? '#5fd18b' : '#ff6b6b', null, 2);
+          const lp = add(v, mul(sub(v, CPS[player.next].c), 0.18));
+          text(`v${'₀₁₂₃'[i]}`, lp.x, lp.y, '#ffd166', 12, 'center');
+        });
+        ctx.strokeStyle = 'rgba(255,209,102,.5)'; ctx.lineWidth = 1; ctx.setLineDash([3, 5]);
+        ctx.beginPath(); ctx.moveTo(player.pos.x, player.pos.y); ctx.lineTo(CPS[player.next].c.x, CPS[player.next].c.y); ctx.stroke(); ctx.setLineDash([]);
+        circle(player.pos, 3, '#ffd166');
+      },
+      live() {
+        const q = CPS[player.next].quad, cs = edgeCrosses(player.pos, q);
+        const inside = insideConvex(player.pos, q);
+        return `next checkpoint ${player.next} (yellow)\n` + cs.map((c, i) => ` e${'₀₁₂₃'[i]} × (p − v${'₀₁₂₃'[i]}) = ${s0(c).padStart(7)}`).join('\n') +
+          `\n inside? ${inside ? 'YES — all the same sign' : 'no — signs differ'}\n\ncheckpoints passed ${player.cp} / ${LAPS * K}`;
+      },
+    },
+    {
+      name: 'Slipstream', chap: 'Chapter 13.5',
+      formula: 'area = ½ |AB × AC|\nP inside if AB × AP, BC × BP, CA × CP\n  all have the same sign',
+      used: ['Slipstream (drafting) zones in racing games', 'Point-in-triangle tests on navigation meshes',
+        'Picking the triangle of a 3D model under the mouse', 'Barycentric weights for blending colors and heights'],
+      tryThis: 'Tuck in behind an AI car on the long top straight. While all three numbers share a sign you are in its wake: +12% top speed and +50% acceleration.',
+      draw() {
+        const n = nearestAI();
+        for (const c of ais()) {
+          const t = slipTri(c), on = insideConvex(player.pos, t);
+          poly(t, on ? 'rgba(108,184,255,.25)' : 'rgba(108,184,255,.08)', c === n ? '#6cb8ff' : 'rgba(108,184,255,.4)', 1.5);
+          if (c === n) ['A', 'B', 'C'].forEach((L, i) => text(L, t[i].x, t[i].y - 6, '#6cb8ff', 12, 'center'));
+        }
+      },
+      live() {
+        const c = nearestAI(); if (!c) return '';
+        const [A, B, C] = slipTri(c), P = player.pos;
+        const k1 = cross(sub(B, A), sub(P, A)), k2 = cross(sub(C, B), sub(P, B)), k3 = cross(sub(A, C), sub(P, C));
+        const area = Math.abs(cross(sub(B, A), sub(C, A))) / 2;
+        const inside = (k1 >= 0 && k2 >= 0 && k3 >= 0) || (k1 <= 0 && k2 <= 0 && k3 <= 0);
+        return `behind ${c.name}\n AB × AP = ${s0(k1)}\n BC × BP = ${s0(k2)}\n CA × CP = ${s0(k3)}\n inside? ${inside ? 'YES — slipstream!' : 'no'}\n\n area = ½|AB × AC| = ${f0(area)}\n (${SLIP_LEN} long × ${2 * SLIP_HALF} wide ÷ 2)`;
+      },
+    },
+    {
+      name: 'Torque & spin', chap: 'Chapter 13.8',
+      formula: 'τ = r × J = rx·Jy − ry·Jx\nΔω = τ ÷ I        (I = 300)\ny-down: τ > 0 spins clockwise',
+      used: ['Cars spinning out after a hit on a rear corner', 'Crates and debris tumbling when hit off-center',
+        'Pinball flippers, spinning tops, ragdolls', 'Every rigid-body physics engine'],
+      tryThis: 'Nudge an AI car on a rear corner from the side: r and J point different ways, τ is large and it spins out. Hit it square from behind and τ is almost 0. Untick "Spin from torque" and bumps never rotate anything.',
+      controls: `<label><input type="checkbox" data-set="torque"> Spin from torque (r × J)</label>`,
+      draw() {
+        if (!hits.length || state.time - hits.time > 3) { text('bump a car to see r, J and τ', player.pos.x, player.pos.y - 26, '#9aa3b2', 12, 'center'); return; }
+        for (const h of hits) {
+          arrow(h.car.pos, h.r, '#b48cff', 'r', 2);
+          arrow(h.p, mul(h.J, 0.6), '#ff6b6b', 'J', 2);
+          text(`τ = ${s0(h.tau)}`, h.car.pos.x, h.car.pos.y - 26, '#b48cff', 12, 'center');
+        }
+      },
+      live() {
+        let s = '';
+        if (hits.length) {
+          const h = hits.find(x => x.car !== player) || hits[0];
+          s += `last bump on ${h.car.name}\n r = (${f0(h.r.x)}, ${f0(h.r.y)})\n J = (${f0(h.J.x)}, ${f0(h.J.y)})\n τ = ${f0(h.r.x)}×${f0(h.J.y)} − ${f0(h.r.y)}×${f0(h.J.x)}\n   = ${s0(h.tau)}\n Δω = τ ÷ ${SPIN_I} = ${s2(h.dw)} rad/s\n\n`;
+        } else s += 'no bumps yet\n\n';
+        return s + 'spin ω (rad/s)\n' + cars.map(c => ` ${c.name.padEnd(7)} ${s2(c.w)}`).join('\n');
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Race once first. Then press 1–5 to see the cross products behind every steering decision.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

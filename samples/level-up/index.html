@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Level Up</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls select, .controls input[type=range] { flex: 1; }
+  select { background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px; }
+  .graph { display: block; width: 100%; height: 150px; background: #11151c; border-radius: 6px; margin-top: 6px; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Level Up</h1>
+    <p class="sub">Survive eight waves. Enemies grow exponentially; you grow with the XP curve you pick.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows (you shoot automatically) · <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Small helpers ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dist = (a, b) => len(sub(a, b));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => n.toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => n.toFixed(3);
+
+  // ---------- Growth: XP curves (XP needed to go from level L to L + 1) ----------
+  const CURVES = {
+    linear:      { label: 'linear  40·L',          need: L => 40 * L },
+    polynomial:  { label: 'polynomial  40·L^1.5',  need: L => Math.round(40 * Math.pow(L, 1.5)) },
+    exponential: { label: 'exponential  20·2^(L−1)', need: L => Math.round(20 * Math.pow(2, L - 1)) },
+  };
+  // Level reached with a total amount of XP
+  function levelFrom(curve, total) {
+    let L = 1, left = total;
+    while (left >= CURVES[curve].need(L) && L < 99) { left -= CURVES[curve].need(L); L++; }
+    return { level: L, into: left, need: CURVES[curve].need(L) };
+  }
+  function totalFor(curve, L) { let s = 0; for (let i = 1; i < L; i++) s += CURVES[curve].need(i); return s; }
+
+  // ---------- Waves: enemy scaling ----------
+  const WAVES = 8;
+  const enemyCount = w => 4 + 2 * w;                         // linear
+  const enemyHp = w => 3 * Math.pow(1.25, w - 1);             // exponential, ×1.25 per wave
+  const xpPerKill = w => Math.round(10 * Math.pow(1.3, w - 1));
+  const scorePerKill = w => 10 * Math.pow(3, w - 1);          // idle-style big numbers
+  const damageAt = L => 1 + 0.25 * (L - 1);                   // linear in level
+
+  // ---------- Constants ----------
+  const VIEW = { w: 1000, h: 700 };
+  const ARENA = { w: 2400, h: 1600 };
+  const PLAYER_SPEED = 240, PLAYER_R = 14, MAX_HP = 100;
+  const FIRE_RATE = 5, FIRE_RANGE = 480, BULLET_SPEED = 720;
+  const ENEMY_R = 15, TOUCH_DAMAGE = 12, INVULN = 0.6;
+  const KNOCK = 320, KNOCK_K = 6;          // knockback speed decays as e^(−6t)
+  const LEVEL_HEAL = 15;
+  const HP_BAR_K = 4, XP_BAR_K = 8;
+  const SPAWN_RING = 600;
+
+  const settings = {
+    curve: 'polynomial',
+    camK: 6,
+    frameIndep: true,  // pitfall when false: a fixed fraction per frame
+    fps: 0,            // 0 = native
+    volume: 50,        // slider position 0–100
+    dbSlider: true,    // pitfall when false: slider maps straight to gain
+  };
+
+  // x ← x + (target − x)(1 − e^(−kΔt)), or the frame-rate-dependent version
+  const smoothFraction = (k, dt) => settings.frameIndep ? 1 - Math.exp(-k * dt) : Math.min(1, k / 60);
+  const smooth = (x, target, k, dt) => x + (target - x) * smoothFraction(k, dt);
+
+  // Volume: slider s ∈ [0, 1] → decibels −40…0 → gain = 10^(dB/20)
+  const sliderDb = () => -40 + 40 * settings.volume / 100;
+  const gain = () => settings.volume <= 0 ? 0 : settings.dbSlider ? Math.pow(10, sliderDb() / 20) : settings.volume / 100;
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VIEW.w, H / VIEW.h);
+    OX = (W - VIEW.w * S) / 2; OY = (H - VIEW.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Sound (tiny synthesized blips, no files) ----------
+  let audio = null, master = null;
+  function initAudio() {
+    if (audio || !(window.AudioContext || window.webkitAudioContext)) return;
+    try {
+      audio = new (window.AudioContext || window.webkitAudioContext)();
+      master = audio.createGain(); master.gain.value = gain(); master.connect(audio.destination);
+    } catch (e) { audio = null; }
+  }
+  function blip(freq, dur = 0.07, type = 'sine', vol = 0.25) {
+    if (!audio || !master) return;
+    const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);  // exponential fade
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if (e.target && (e.target.tagName === 'SELECT' || e.target.type === 'range')) return;
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+    initAudio();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p' && !state.over) paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { initAudio(); if (!started) started = true; else if (state.over) reset(); });
+
+  // ---------- State ----------
+  let state, player, enemies, bullets, popups, cam, history;
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, wave: 0, toSpawn: 0, spawnTimer: 0, breakTimer: 1.5, kills: 0,
+      totalXp: 0, shownXp: 0, maxLevel: 1, score: 0, banner: 'WAVE 1', bannerT: 0 };
+    player = { pos: V(ARENA.w / 2, ARENA.h / 2), vel: V(), knock: V(), r: PLAYER_R, hp: MAX_HP, shownHp: MAX_HP,
+      cd: 0, invuln: 0, sinceHit: 99 };
+    enemies = []; bullets = []; popups = [];
+    cam = V(player.pos.x, player.pos.y);
+    history = [];
+  }
+  reset();
+
+  const level = () => levelFrom(settings.curve, state.totalXp).level;
+  function popup(pos, text, color, size = 14) { popups.push({ pos: V(pos.x, pos.y), text, color, size, life: 1.1 }); }
+
+  function startWave(w) {
+    state.wave = w; state.toSpawn = enemyCount(w); state.spawnTimer = 0.3;
+    history.push({ wave: w, level: level(), damage: damageAt(level()) });
+  }
+  function spawnEnemy() {
+    const a = rand(0, Math.PI * 2);
+    const p = add(player.pos, V(Math.cos(a) * SPAWN_RING, Math.sin(a) * SPAWN_RING));
+    p.x = clamp(p.x, 30, ARENA.w - 30); p.y = clamp(p.y, 30, ARENA.h - 30);
+    const hp = enemyHp(state.wave);
+    enemies.push({ pos: p, hp, maxHp: hp, push: V(), speed: 70 + 8 * state.wave + rand(-8, 8), flash: 0 });
+  }
+  function gainXp(n) {
+    state.totalXp += n;
+    const L = level();
+    if (L > state.maxLevel) {
+      state.maxLevel = L;
+      player.hp = Math.min(MAX_HP, player.hp + LEVEL_HEAL);
+      popup(V(player.pos.x, player.pos.y - 36), `LEVEL ${L}!`, '#5fd18b', 18);
+      blip(523, 0.12, 'triangle', 0.3); setTimeout(() => blip(784, 0.16, 'triangle', 0.3), 90);
+    }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 26 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    // Smoothed camera and bars (Chapter 7.7)
+    cam.x = smooth(cam.x, player.pos.x, settings.camK, dt);
+    cam.y = smooth(cam.y, player.pos.y, settings.camK, dt);
+    player.shownHp = smooth(player.shownHp, player.hp, HP_BAR_K, dt);
+    state.shownXp = smooth(state.shownXp, state.totalXp, XP_BAR_K, dt);
+    if (state.over) return;
+    state.time += dt;
+    state.bannerT += dt;
+
+    // Waves
+    if (state.toSpawn === 0 && enemies.length === 0) {
+      if (state.wave >= WAVES) { state.over = 'won'; return; }
+      state.breakTimer -= dt;
+      if (state.breakTimer <= 0) { startWave(state.wave + 1); state.breakTimer = 2.5; }
+    }
+    if (state.toSpawn > 0) {
+      state.spawnTimer -= dt;
+      if (state.spawnTimer <= 0) { spawnEnemy(); state.toSpawn--; state.spawnTimer = 0.45; }
+    }
+
+    // Player: input velocity plus a knockback that decays exponentially
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    player.vel = add(mul(norm(V(ix, iy)), PLAYER_SPEED), player.knock);
+    player.pos = add(player.pos, mul(player.vel, dt));
+    player.pos.x = clamp(player.pos.x, PLAYER_R, ARENA.w - PLAYER_R);
+    player.pos.y = clamp(player.pos.y, PLAYER_R, ARENA.h - PLAYER_R);
+    player.knock = mul(player.knock, Math.exp(-KNOCK_K * dt));          // v ← v·e^(−kΔt)
+    player.invuln -= dt; player.sinceHit += dt;
+
+    // Auto-fire at the nearest enemy in range
+    player.cd -= dt;
+    let target = null, bd = FIRE_RANGE;
+    for (const e of enemies) { const d = dist(e.pos, player.pos); if (d < bd) { bd = d; target = e; } }
+    if (target && player.cd <= 0) {
+      const dir = norm(sub(target.pos, player.pos));
+      bullets.push({ pos: add(player.pos, mul(dir, PLAYER_R + 4)), vel: mul(dir, BULLET_SPEED), life: 0.9 });
+      player.cd = 1 / FIRE_RATE;
+    }
+    for (const b of bullets) { b.pos = add(b.pos, mul(b.vel, dt)); b.life -= dt; }
+
+    // Enemies chase, with a little separation so they do not stack
+    for (const e of enemies) {
+      const to = sub(player.pos, e.pos);
+      e.pos = add(e.pos, mul(add(mul(norm(to), e.speed), e.push), dt));
+      e.push = mul(e.push, Math.exp(-KNOCK_K * dt));
+      e.flash -= dt;
+    }
+    for (let i = 0; i < enemies.length; i++) for (let j = i + 1; j < enemies.length; j++) {
+      const a = enemies[i], b = enemies[j], d = sub(b.pos, a.pos), l = len(d);
+      if (l > 0 && l < ENEMY_R * 2) { const n = mul(d, (ENEMY_R * 2 - l) / l / 2); a.pos = sub(a.pos, n); b.pos = add(b.pos, n); }
+    }
+
+    // Bullets hit enemies
+    const dmg = damageAt(level());
+    for (const b of bullets) {
+      if (b.life <= 0) continue;
+      for (const e of enemies) {
+        if (e.hp > 0 && dist(b.pos, e.pos) < ENEMY_R + 4) {
+          e.hp -= dmg; e.flash = 0.08; b.life = 0;
+          e.push = add(e.push, mul(norm(b.vel), 90));
+          break;
+        }
+      }
+    }
+    for (const e of enemies) if (e.hp <= 0) {
+      state.kills++;
+      state.score += scorePerKill(state.wave);
+      gainXp(xpPerKill(state.wave));
+      popup(V(e.pos.x, e.pos.y - 16), `+${xpPerKill(state.wave)} xp`, '#b48cff', 12);
+      blip(660 + Math.random() * 120, 0.06, 'sine', 0.18);
+    }
+    enemies = enemies.filter(e => e.hp > 0);
+    bullets = bullets.filter(b => b.life > 0);
+
+    // Enemies touch the player: damage + knockback
+    for (const e of enemies) {
+      if (player.invuln <= 0 && dist(e.pos, player.pos) < ENEMY_R + PLAYER_R) {
+        player.hp -= TOUCH_DAMAGE; player.invuln = INVULN; player.sinceHit = 0;
+        player.knock = mul(norm(sub(player.pos, e.pos)), KNOCK);
+        popup(V(player.pos.x, player.pos.y - 28), `−${TOUCH_DAMAGE}`, '#ff6b6b', 15);
+        blip(140, 0.12, 'square', 0.15);
+        if (player.hp <= 0) { player.hp = 0; state.over = 'dead'; }
+      }
+    }
+  }
+
+  // ---------- Big-number formatting (Chapter 7.9) ----------
+  const SUFFIX = ['', 'K', 'M', 'B', 'T'];
+  function big(n) {
+    if (n < 1000) return f0(n);
+    const k = Math.min(SUFFIX.length - 1, Math.floor(Math.log10(n) / 3));
+    return (n / Math.pow(1000, k)).toFixed(n / Math.pow(1000, k) < 100 ? 1 : 0) + SUFFIX[k];
+  }
+
+  // ---------- Drawing ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0, r), 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function dashed(on) { ctx.setLineDash(on ? [6, 6] : []); }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    // World: screen = (p − camera) × S + view center
+    const cx = OX + VIEW.w * S / 2, cy = OY + VIEW.h * S / 2;
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * (cx - cam.x * S), DPR * (cy - cam.y * S));
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, ARENA.w, ARENA.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= ARENA.w; x += 80) { ctx.moveTo(x, 0); ctx.lineTo(x, ARENA.h); }
+    for (let y = 0; y <= ARENA.h; y += 80) { ctx.moveTo(0, y); ctx.lineTo(ARENA.w, y); }
+    ctx.stroke();
+    ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 3; ctx.strokeRect(0, 0, ARENA.w, ARENA.h);
+
+    for (const e of enemies) {
+      circle(e.pos, ENEMY_R, e.flash > 0 ? '#ffffff' : '#5a2330', '#ff6b6b', 2);
+      const fr = clamp(e.hp / e.maxHp, 0, 1);
+      ctx.fillStyle = '#1f2430'; ctx.fillRect(e.pos.x - 15, e.pos.y - 24, 30, 4);
+      ctx.fillStyle = '#ff6b6b'; ctx.fillRect(e.pos.x - 15, e.pos.y - 24, 30 * fr, 4);
+    }
+    ctx.fillStyle = '#cfe6ff';
+    for (const b of bullets) { ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, 3.5, 0, Math.PI * 2); ctx.fill(); }
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 14) % 2 === 0;
+    if (!blink) circle(player.pos, PLAYER_R, '#2a5d8f', '#6cb8ff', 3);
+
+    for (const l of LENSES) if (l.on && l.world) l.world();
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, p.size, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD in view units
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    drawHud();
+    for (const l of LENSES) if (l.on && l.hud) l.hud();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('LEVEL UP', ['Survive 8 waves · you shoot automatically', 'WASD or arrow keys to move · pick an XP curve with lens 1', 'Press any key to start']);
+    else if (state.over === 'dead') overlay('DEFEATED', [`wave ${state.wave} · level ${level()} · score ${big(state.score)}`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('YOU SURVIVED', [`level ${level()} (${settings.curve}) · score ${big(state.score)} · ${f0(state.time)} s`, 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function drawHud() {
+    const x = 20, y = 18, w = 260;
+    // HP: the white bar is the smoothed value chasing the real one
+    ctx.fillStyle = '#1f2430'; ctx.fillRect(x, y, w, 14);
+    ctx.fillStyle = 'rgba(255,255,255,.4)'; ctx.fillRect(x, y, w * clamp(player.shownHp / MAX_HP, 0, 1), 14);
+    ctx.fillStyle = '#5fd18b'; ctx.fillRect(x, y, w * clamp(player.hp / MAX_HP, 0, 1), 14);
+    text(`HP ${f0(player.hp)}`, x + 6, y + 11, '#0f1218', 11);
+    // XP: the bar shows the smoothed total, so it fills, wraps at each level and fills again
+    const shown = levelFrom(settings.curve, state.shownXp);
+    const real = levelFrom(settings.curve, state.totalXp);
+    ctx.fillStyle = '#1f2430'; ctx.fillRect(x, y + 20, w, 8);
+    ctx.fillStyle = '#b48cff'; ctx.fillRect(x, y + 20, w * clamp(shown.into / shown.need, 0, 1), 8);
+    text(`Level ${real.level}  ·  XP ${real.into}/${real.need}  ·  damage ${f2(damageAt(real.level))}`, x, y + 46, '#cfb8ff', 12);
+    text(`${settings.curve} curve`, x, y + 62, '#6b7385', 11);
+    text(state.wave ? `Wave ${state.wave}/${WAVES}` : 'Get ready', VIEW.w / 2, 32, '#e6e9ef', 18, 'center');
+    text(`enemy HP ${f1(enemyHp(Math.max(1, state.wave)))}`, VIEW.w / 2, 50, '#ff9b9b', 11, 'center');
+    text(`score ${big(state.score)}`, VIEW.w - 20, 32, '#ffd166', 18, 'right');
+    if (state.toSpawn === 0 && enemies.length === 0 && started && !state.over && state.wave < WAVES)
+      text(`WAVE ${state.wave + 1} incoming`, VIEW.w / 2, VIEW.h / 2 - 80, '#ffb547', 24, 'center');
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', W < 560 ? 11 : 13, 'center'));
+  }
+
+  // ---------- Lens card graph helpers ----------
+  function axes(g, w, h, pad, xLabel, yLabel) {
+    g.fillStyle = '#11151c'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = '#2a3140'; g.lineWidth = 1; g.beginPath();
+    g.moveTo(pad, 6); g.lineTo(pad, h - pad); g.lineTo(w - 6, h - pad); g.stroke();
+    g.font = '10px Menlo, Consolas, monospace'; g.fillStyle = '#6b7385';
+    g.textAlign = 'right'; g.fillText(xLabel, w - 6, h - 6);
+    g.textAlign = 'left'; g.fillText(yLabel, pad + 4, 14);
+  }
+  function line(g, pts, color, width = 2, dash = []) {
+    g.strokeStyle = color; g.lineWidth = width; g.setLineDash(dash); g.beginPath();
+    pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.stroke(); g.setLineDash([]);
+  }
+  function dot(g, x, y, color, r = 4) { g.fillStyle = color; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); }
+  const CURVE_COLOR = { linear: '#6cb8ff', polynomial: '#5fd18b', exponential: '#ff6b6b' };
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'XP curve', chap: 'Chapter 7.3',
+      formula: () => `XP to go from level L to L + 1:\n linear       40·L\n polynomial   round(40·L^1.5)\n exponential  round(20·2^(L−1))\nlevel ${level()} → next needs ${CURVES[settings.curve].need(level())}`,
+      used: ['XP and level curves in RPGs and shooters', 'Skill trees and mastery ranks',
+        'Battle-pass tiers and account levels', 'Upgrade costs in strategy and idle games'],
+      tryThis: 'Pick "exponential": the first levels arrive in seconds, then the wall hits around level 7. Switch curves mid-run: the same total XP gives a different level.',
+      controls: `<label>XP curve <select data-set="curve">${Object.keys(CURVES).map(k => `<option value="${k}">${k}</option>`).join('')}</select></label>`,
+      graph(g, w, h) {
+        const pad = 24, maxL = 10, maxY = 1400;
+        axes(g, w, h, pad, 'level', 'XP needed');
+        const X = L => pad + (L - 1) / (maxL - 1) * (w - pad - 10), Y = v => h - pad - Math.min(v, maxY) / maxY * (h - pad - 18);
+        for (const k of Object.keys(CURVES)) {
+          const pts = []; for (let L = 1; L <= maxL; L++) pts.push([X(L), Y(CURVES[k].need(L))]);
+          line(g, pts, CURVE_COLOR[k], k === settings.curve ? 3 : 1.2);
+        }
+        const L = level(); if (L <= maxL) dot(g, X(L), Y(CURVES[settings.curve].need(L)), '#ffd166', 5);
+        g.fillStyle = CURVE_COLOR.exponential; g.textAlign = 'right'; g.fillText('exp. leaves the chart ↑', w - 8, 26);
+      },
+      live() {
+        const r = levelFrom(settings.curve, state.totalXp);
+        const rows = Object.keys(CURVES).map(k => `${k.padEnd(12)} level ${levelFrom(k, state.totalXp).level}`).join('\n');
+        return `total XP      ${state.totalXp}\nlevel         ${r.level}\ninto level    ${r.into} / ${r.need}\nkills to next ${Math.ceil((r.need - r.into) / xpPerKill(Math.max(1, state.wave)))}\n\nsame XP on each curve:\n${rows}`;
+      },
+    },
+    {
+      name: 'Wave scaling', chap: 'Chapter 7.2, 7.4',
+      formula: 'enemy HP(w)  = 3 × 1.25^(w−1)\nenemies(w)   = 4 + 2w\nXP per kill  = round(10 × 1.3^(w−1))\nyour damage  = 1 + 0.25(L − 1)',
+      used: ['Enemy health and damage per wave or floor', 'Boss scaling in roguelikes',
+        'Tower-defense creep waves', 'Rubber-banding difficulty'],
+      tryThis: 'Watch the red curve: it multiplies by 1.25 every wave. Your damage only adds 0.25 per level. Shots per enemy climbs unless levels keep coming.',
+      world() {
+        for (const e of enemies) text(f1(e.hp), e.pos.x, e.pos.y + 30, '#ff9b9b', 11, 'center');
+      },
+      graph(g, w, h) {
+        const pad = 24, maxY = 16;
+        axes(g, w, h, pad, 'wave', 'HP / damage');
+        const X = wv => pad + (wv - 1) / (WAVES - 1) * (w - pad - 10), Y = v => h - pad - Math.min(v, maxY) / maxY * (h - pad - 18);
+        const pts = []; for (let i = 0; i <= 70; i++) { const wv = 1 + i / 10; pts.push([X(wv), Y(enemyHp(wv))]); }
+        line(g, pts, '#ff6b6b', 2.5);
+        const dp = history.map(hh => [X(hh.wave), Y(hh.damage)]);
+        if (dp.length > 1) line(g, dp, '#6cb8ff', 2);
+        for (const p of dp) dot(g, p[0], p[1], '#6cb8ff', 3.5);
+        if (state.wave) dot(g, X(state.wave), Y(enemyHp(state.wave)), '#ffd166', 5);
+        g.textAlign = 'left'; g.fillStyle = '#ff6b6b'; g.fillText('enemy HP', pad + 8, 28);
+        g.fillStyle = '#6cb8ff'; g.fillText('your damage', pad + 8, 40);
+      },
+      live() {
+        const wv = Math.max(1, state.wave), hp = enemyHp(wv), d = damageAt(level());
+        return `wave         ${wv}\nenemy HP     3 × 1.25^${wv - 1} = ${f2(hp)}\nenemies      ${enemyCount(wv)}\nwave total   ${f1(hp * enemyCount(wv))} HP\nyour damage  ${f2(d)} per shot\nshots/enemy  ${Math.ceil(hp / d - 1e-9)}\nwave clears  ${f1(enemyCount(wv) * Math.ceil(hp / d - 1e-9) / FIRE_RATE)} s of fire`;
+      },
+    },
+    {
+      name: 'Logs & big numbers', chap: 'Chapter 7.5, 7.9',
+      formula: 'log_b(x) = how many times you\n  multiply by b to reach x\nexponential: level = 1 + log₂(T/20 + 1)\nscore per kill = 10 × 3^(w−1)\ndigits = floor(log₁₀ n) + 1',
+      used: ['Working out a level from total XP', '"How many waves until HP doubles?"',
+        'Idle-game numbers: 1.2K, 3.4M, 5.6B', 'Decibels, star ratings, rank tiers'],
+      tryThis: 'Compare the three curves in the graph: level grows like √T for linear, slower for polynomial, and like log T for exponential. The last wave is worth more score than all the others combined.',
+      graph(g, w, h) {
+        const pad = 24, maxT = 4000, maxL = 16;
+        axes(g, w, h, pad, 'total XP', 'level');
+        const X = T => pad + T / maxT * (w - pad - 10), Y = L => h - pad - (L - 1) / (maxL - 1) * (h - pad - 18);
+        for (const k of Object.keys(CURVES)) {
+          const pts = []; for (let T = 0; T <= maxT; T += 20) pts.push([X(T), Y(levelFrom(k, T).level)]);
+          line(g, pts, CURVE_COLOR[k], k === settings.curve ? 2.5 : 1.2);
+        }
+        if (state.totalXp <= maxT) dot(g, X(state.totalXp), Y(level()), '#ffd166', 5);
+        g.textAlign = 'left';
+        Object.keys(CURVES).forEach((k, i) => { g.fillStyle = CURVE_COLOR[k]; g.fillText(k, pad + 8, 28 + 12 * i); });
+      },
+      live() {
+        const T = state.totalXp, n = Math.max(1, state.score);
+        return `waves until enemy HP doubles\n log 2 ÷ log 1.25 = ${f2(Math.log(2) / Math.log(1.25))}\nexponential curve at T = ${T}\n 1 + log₂(${T}/20 + 1) = ${f2(1 + Math.log2(T / 20 + 1))}\n\nscore ${f0(state.score)}\n log₁₀ = ${f2(Math.log10(n))} → ${Math.floor(Math.log10(n)) + 1} digits\n shown as ${big(state.score)}\nnext kill worth ${big(scorePerKill(Math.max(1, state.wave)))}`;
+      },
+    },
+    {
+      name: 'Smoothing', chap: 'Chapter 7.7',
+      formula: () => settings.frameIndep
+        ? 'x ← x + (target − x)(1 − e^(−k·Δt))\nhalf-life = ln 2 ÷ k'
+        : `x ← x + (target − x) × ${f3(Math.min(1, settings.camK / 60))}\n(a fixed fraction per frame: BUG)`,
+      used: ['Smooth follow cameras', 'Health and XP bars that glide',
+        'UI values and needles that settle', 'Damping aim, zoom and audio levels'],
+      tryThis: 'Set the frame rate to 15 fps and untick "Frame-rate independent": the camera lags far behind. Tick it again and the camera behaves the same at every frame rate.',
+      controls: `<label><input type="checkbox" data-set="frameIndep"> Frame-rate independent smoothing</label>
+        <label>Frame rate <select data-set="fps"><option value="0">native</option><option value="60">60 fps</option><option value="30">30 fps</option><option value="15">15 fps</option></select></label>
+        <label>Camera k <input type="range" min="1" max="20" step="0.5" data-set="camK"> <span data-show="camK"></span></label>`,
+      world() {
+        dashed(true); ctx.strokeStyle = '#5fd18b'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(cam.x, cam.y); ctx.lineTo(player.pos.x, player.pos.y); ctx.stroke(); dashed(false);
+        ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 2; ctx.beginPath();
+        ctx.moveTo(cam.x - 12, cam.y); ctx.lineTo(cam.x + 12, cam.y); ctx.moveTo(cam.x, cam.y - 12); ctx.lineTo(cam.x, cam.y + 12); ctx.stroke();
+        text(`camera · lag ${f0(dist(cam, player.pos))}`, cam.x + 14, cam.y - 8, '#ffb547', 12);
+      },
+      graph(g, w, h) {
+        const pad = 24, k = settings.camK, F = settings.fps || Math.max(10, Math.round(fpsShown));
+        axes(g, w, h, pad, 'time (s)', 'gap left');
+        const X = t => pad + t * (w - pad - 10), Y = v => h - pad - v * (h - pad - 18);
+        const pts = []; for (let i = 0; i <= 100; i++) pts.push([X(i / 100), Y(Math.exp(-k * i / 100))]);
+        line(g, pts, '#6cb8ff', 2.5);
+        const fixed = Math.min(1, k / 60), stairs = [];
+        let v = 1; for (let n = 0; n <= F; n++) { const t = n / F; stairs.push([X(t), Y(v)]); v *= 1 - fixed; stairs.push([X(t), Y(v)]); }
+        line(g, stairs, '#ff6b6b', 1.5);
+        const hl = Math.log(2) / k; line(g, [[X(hl), Y(0)], [X(hl), Y(0.5)], [X(0), Y(0.5)]], '#6b7385', 1, [3, 3]);
+        g.textAlign = 'left'; g.fillStyle = '#6cb8ff'; g.fillText(`e^(−${k}t)`, pad + 60, 28);
+        g.fillStyle = '#ff6b6b'; g.fillText(`${f3(fixed)} per frame at ${F} fps`, pad + 60, 40);
+      },
+      live() {
+        const a = smoothFraction(settings.camK, lastDt), correct = 1 - Math.exp(-settings.camK * lastDt);
+        return `frame rate      ${f0(fpsShown)} fps   Δt ${f1(lastDt * 1000)} ms\nk               ${settings.camK}\nfraction used   ${f3(a)} per frame\nshould be       ${f3(correct)}\nhalf-life       ${f3(Math.log(2) / settings.camK)} s\ncamera lag      ${f0(dist(cam, player.pos))} px\nHP bar k ${HP_BAR_K}, XP bar k ${XP_BAR_K}`;
+      },
+    },
+    {
+      name: 'Decay & decibels', chap: 'Chapter 7.6, 7.8',
+      formula: () => `knockback v = ${KNOCK} × e^(−${KNOCK_K}t)\nslide distance = ${KNOCK} ÷ ${KNOCK_K} ≈ ${f0(KNOCK / KNOCK_K)} px\ndB = −40 + 40·s,  gain = 10^(dB/20)`,
+      used: ['Knockback, recoil and screen shake that die away', 'Fades, trails and afterglow',
+        'Volume sliders and audio falloff', 'Radioactive, poison and cooldown decay'],
+      tryThis: 'Get hit and watch the dot slide down the decay curve. Drag the volume slider to 25%: with decibels it sounds a quarter of the way up. Untick "Slider in decibels" and most of the slider sounds the same.',
+      controls: `<label>Volume <input type="range" min="0" max="100" step="1" data-set="volume"> <span data-show="volume"></span>%</label>
+        <label><input type="checkbox" data-set="dbSlider"> Slider in decibels</label>`,
+      world() {
+        if (len(player.knock) > 2) {
+          ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2.5; ctx.beginPath();
+          const tip = add(player.pos, mul(player.knock, 0.25));
+          ctx.moveTo(player.pos.x, player.pos.y); ctx.lineTo(tip.x, tip.y); ctx.stroke();
+          text(`${f0(len(player.knock))} px/s`, tip.x + 6, tip.y - 6, '#ff6b6b', 12);
+        }
+      },
+      graph(g, w, h) {
+        const pad = 24, half = (w - pad) / 2;
+        axes(g, w, h, pad, 'slider', 'speed / gain');
+        // left: knockback decay over 1 s
+        const X = t => pad + t * (half - 16), Y = v => h - pad - v * (h - pad - 18);
+        const pts = []; for (let i = 0; i <= 60; i++) pts.push([X(i / 60), Y(Math.exp(-KNOCK_K * i / 60))]);
+        line(g, pts, '#ff6b6b', 2.2);
+        const hl = Math.log(2) / KNOCK_K; line(g, [[X(hl), Y(0)], [X(hl), Y(0.5)]], '#6b7385', 1, [3, 3]);
+        if (player.sinceHit < 1) dot(g, X(player.sinceHit), Y(Math.exp(-KNOCK_K * player.sinceHit)), '#ffd166', 4.5);
+        g.textAlign = 'left'; g.fillStyle = '#ff6b6b'; g.fillText('knockback, 1 s', pad + 6, 28);
+        // right: gain against slider position
+        const X2 = s => pad + half + s * (half - 16);
+        const db = [], lin = [];
+        for (let i = 0; i <= 50; i++) { const s = i / 50; db.push([X2(s), Y(s === 0 ? 0 : Math.pow(10, (-40 + 40 * s) / 20))]); lin.push([X2(s), Y(s)]); }
+        line(g, lin, '#6b7385', 1.2, [4, 3]); line(g, db, '#6cb8ff', 2.2);
+        dot(g, X2(settings.volume / 100), Y(gain()), '#ffd166', 4.5);
+        g.fillStyle = '#6cb8ff'; g.fillText('gain', pad + half + 6, 28);
+      },
+      live() {
+        const v = len(player.knock);
+        const db = gain() > 0 ? 20 * Math.log10(gain()) : -Infinity;
+        return `knockback now   ${f0(v)} px/s\nhalf-life       ln2 ÷ ${KNOCK_K} = ${f3(Math.log(2) / KNOCK_K)} s\nsince last hit  ${player.sinceHit < 99 ? f2(player.sinceHit) + ' s' : '—'}\n\nslider          ${settings.volume}%\nmode            ${settings.dbSlider ? 'decibels' : 'linear gain (bug)'}\ngain            ${f3(gain())}\nlevel           ${isFinite(db) ? f1(db) + ' dB' : 'silent'}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null, graphEl = null, formulaEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  const formulaText = l => typeof l.formula === 'function' ? l.formula() : l.formula;
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see the growth and decay behind levels, waves, the camera and the sound.</p>`;
+      liveEl = graphEl = formulaEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula"></div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live graph</h3><canvas class="graph"></canvas>
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    graphEl = cardEl.querySelector('.graph');
+    formulaEl = cardEl.querySelector('.formula');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        if (el.type === 'checkbox') settings[key] = el.checked;
+        else if (key === 'curve') settings[key] = el.value;
+        else settings[key] = parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+        if (key === 'curve') { state.maxLevel = Math.max(state.maxLevel, level()); el.blur(); }
+        if (key === 'fps') el.blur();
+        if (master) master.gain.value = gain();
+        updateLive();
+      });
+    });
+    updateLive();
+  }
+  function updateLive() {
+    if (!selected) return;
+    if (liveEl) liveEl.textContent = selected.live();
+    if (formulaEl) formulaEl.textContent = formulaText(selected);
+  }
+  function drawGraph() {
+    if (!graphEl || !selected || !selected.graph) return;
+    const w = graphEl.clientWidth, h = graphEl.clientHeight;
+    if (!w || !h) return;
+    const pw = Math.round(w * DPR), ph = Math.round(h * DPR);
+    if (graphEl.width !== pw || graphEl.height !== ph) { graphEl.width = pw; graphEl.height = ph; }
+    const g = graphEl.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    selected.graph(g, w, h);
+  }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), acc = 0, lastDt = 1 / 60, fpsShown = 60, liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    let dt = (now - last) / 1000;
+    last = now;
+    if (settings.fps > 0) {               // simulate a slower display
+      acc += dt;
+      if (acc < 1 / settings.fps - 0.002) return;
+      dt = acc; acc = 0;
+    }
+    dt = Math.min(dt, 0.1);
+    lastDt = dt;
+    fpsShown += (1 / Math.max(dt, 1e-4) - fpsShown) * 0.1;
+    if (started && !paused) update(dt);
+    render();
+    drawGraph();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transform Lab</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .sl { display: grid; grid-template-columns: 74px 1fr 52px; align-items: center; gap: 8px; margin: 4px 0; font-size: 12.5px; }
+  .sl output { font: 12px Menlo, Consolas, monospace; color: var(--muted); text-align: right; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .btns button { font: inherit; font-size: 12.5px; color: var(--text); background: #11151c; border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 9px; cursor: pointer; }
+  .btns button:hover { border-color: var(--accent); }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Transform Lab</h1>
+    <p class="sub">Match the orange ghost by rotating, scaling and shearing the character. The 2×2 matrix is always on screen.</p>
+    <div class="card" id="ctl">
+      <h2>Transform</h2>
+      <div class="sl"><span>rotate θ</span><input type="range" id="s-rot" min="-180" max="180" step="1"><output id="o-rot"></output></div>
+      <div class="sl"><span>scale x</span><input type="range" id="s-sx" min="-2.5" max="2.5" step="0.05"><output id="o-sx"></output></div>
+      <div class="sl"><span>scale y</span><input type="range" id="s-sy" min="-2.5" max="2.5" step="0.05"><output id="o-sy"></output></div>
+      <div class="sl"><span>shear x</span><input type="range" id="s-shx" min="-1.5" max="1.5" step="0.05"><output id="o-shx"></output></div>
+      <div class="sl"><span>shear y</span><input type="range" id="s-shy" min="-1.5" max="1.5" step="0.05"><output id="o-shy"></output></div>
+      <div class="btns">
+        <button id="b-fx">Flip x (F)</button><button id="b-fy">Flip y (G)</button>
+        <button id="b-ord">Order (O)</button><button id="b-bounce">Bounce (B)</button>
+        <button id="b-reset">Reset (R)</button><button id="b-skip">Skip level (N)</button>
+      </div>
+    </div>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Drag</b> the red and green arrow tips (the matrix columns) · <b>Rotate</b> Q / E ·
+      <b>Scale</b> A / D (x), W / S (y) · <b>Shear</b> Z / X (x), C / V (y) · <b>Flip</b> F / G ·
+      <b>Order</b> O · <b>Bounce</b> B · <b>Lenses</b> keys 1–4 · <b>Reset</b> R
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => (Math.abs(n) < 0.0005 ? 0 : n).toFixed(3);
+  const deg = r => r * 180 / Math.PI;
+  const RAD = Math.PI / 180;
+  const P2 = p => `(${f2(p.x)}, ${f2(p.y)})`;
+
+  // ---------- 2×2 matrices (Chapter 14) ----------
+  // Column vectors, p' = L p.  L = [a c; b d]: first column (a, b), second column (c, d).
+  const L2 = (a, b, c, d) => ({ a, b, c, d });
+  const ID = L2(1, 0, 0, 1);
+  const lmul = (A, B) => L2(A.a * B.a + A.c * B.b, A.b * B.a + A.d * B.b,   // A·B: apply B first, then A
+                            A.a * B.c + A.c * B.d, A.b * B.c + A.d * B.d);
+  const lapply = (A, p) => V(A.a * p.x + A.c * p.y, A.b * p.x + A.d * p.y);
+  const det = A => A.a * A.d - A.b * A.c;
+  const linv = A => { const k = 1 / det(A); return L2(A.d * k, -A.b * k, -A.c * k, A.a * k); };
+  const ROT = t => { const c = Math.cos(t), s = Math.sin(t); return L2(c, s, -s, c); };
+  const SCL = (sx, sy) => L2(sx, 0, 0, sy);
+  const SHR = (kx, ky) => L2(1, ky, kx, 1);        // x' = x + kx·y,  y' = y + ky·x
+
+  // ---------- Settings (lens switches) ----------
+  const settings = {
+    scaleFirst: true,     // M = R·Sh·S (scale, shear, then rotate) — otherwise M = S·Sh·R
+    rowConv: false,       // show the matrix in the row-vector convention (same picture)
+    keepArea: true,       // squash & stretch: sx = 1/sy
+    bounce: false,
+    useInverse: true,     // picking uses M⁻¹ (pitfall when off)
+    showGhost: true,
+  };
+
+  // ---------- Constants ----------
+  const VW = 960, VH = 600;
+  const C = V(480, 310);          // screen position of the origin
+  const U = 80;                   // pixels per unit
+  const TOL = 0.08;               // matrix match tolerance (every entry)
+
+  // ---------- The character, in local units (y-down) ----------
+  const ngon = (cx, cy, r, n = 18) => Array.from({ length: n }, (_, i) => V(cx + r * Math.cos(i / n * 2 * Math.PI), cy + r * Math.sin(i / n * 2 * Math.PI)));
+  const rect = (x0, y0, x1, y1) => [V(x0, y0), V(x1, y0), V(x1, y1), V(x0, y1)];
+  const SHAPES = [
+    { name: 'legs',   pts: rect(-0.34, 0.6, -0.1, 0.95), fill: '#2a3550', stroke: '#6cb8ff' },
+    { name: 'legs',   pts: rect(0.1, 0.6, 0.34, 0.95),   fill: '#2a3550', stroke: '#6cb8ff' },
+    { name: 'body',   pts: rect(-0.42, -0.1, 0.42, 0.62), fill: '#2a4f78', stroke: '#6cb8ff' },
+    { name: 'arm',    pts: rect(0.42, 0.0, 0.8, 0.14),   fill: '#3d6fa3', stroke: '#6cb8ff' },
+    { name: 'sword',  pts: [V(0.8, -0.08), V(1.35, 0.07), V(0.8, 0.22)], fill: '#cfd6e4', stroke: '#e6e9ef' },
+    { name: 'head',   pts: rect(-0.46, -0.92, 0.46, -0.1), fill: '#336494', stroke: '#6cb8ff' },
+    { name: 'eye',    pts: ngon(0.2, -0.6, 0.1), fill: '#ffb547', stroke: '#ffb547' },
+    { name: 'mouth',  pts: rect(0.02, -0.36, 0.36, -0.3), fill: '#0f1218', stroke: '#0f1218' },
+    { name: 'antenna', pts: rect(-0.03, -1.2, 0.03, -0.92), fill: '#9aa3b2', stroke: '#9aa3b2' },
+    { name: 'antenna', pts: ngon(0, -1.24, 0.09), fill: '#ff6b6b', stroke: '#ff6b6b' },
+  ];
+  const HITS = [
+    { name: 'head', r: [-0.46, -0.92, 0.46, -0.1] }, { name: 'body', r: [-0.42, -0.1, 0.42, 0.62] },
+    { name: 'arm', r: [0.42, 0.0, 0.8, 0.14] }, { name: 'sword', r: [0.8, -0.08, 1.35, 0.22] },
+    { name: 'legs', r: [-0.34, 0.6, 0.34, 0.95] }, { name: 'antenna', r: [-0.1, -1.34, 0.1, -0.92] },
+  ];
+  // Landmarks used to decide whether the character matches the target pose
+  const hitName = p => { for (const h of HITS) if (p.x >= h.r[0] && p.x <= h.r[2] && p.y >= h.r[1] && p.y <= h.r[3]) return h.name; return null; };
+
+  // ---------- The transform state ----------
+  const T = { rot: 0, sx: 1, sy: 1, shx: 0, shy: 0 };       // sliders, rot in degrees
+  let free = null;                                           // L2 set by dragging the arrow tips (free mode)
+  let bounceT = 0;
+
+  function composed() {
+    const R = ROT(T.rot * RAD), S = SCL(T.sx, T.sy), H = SHR(T.shx, T.shy);
+    return settings.scaleFirst ? lmul(R, lmul(H, S)) : lmul(S, lmul(H, R));
+  }
+  const baseM = () => free || composed();                    // what the player built
+  function bounceM() {                                        // squash & stretch applied on screen axes
+    if (!settings.bounce) return ID;
+    const by = 1 + 0.35 * Math.sin(bounceT * 5), bx = settings.keepArea ? 1 / by : 1;
+    return SCL(bx, by);
+  }
+  const curM = () => lmul(bounceM(), baseM());              // what is drawn
+
+  // ---------- Levels ----------
+  const LEVELS = [
+    { name: 'Turn it clockwise', hint: 'rotation only', M: ROT(40 * RAD) },
+    { name: 'Squash it flat', hint: 'scale (1.6, 0.6)', M: SCL(1.6, 0.6) },
+    { name: 'Face the other way', hint: 'flip x, then tilt by −30°', M: lmul(ROT(-30 * RAD), SCL(-1, 1)) },
+    { name: 'Lean it over', hint: 'shear x by 0.8', M: SHR(0.8, 0) },
+    { name: 'Stretch, then turn', hint: 'M = R(30°)·S(1.5, 0.7): scale first', M: lmul(ROT(30 * RAD), SCL(1.5, 0.7)) },
+    { name: 'Turn, then squash', hint: 'M = S(1, 0.5)·R(45°): rotate first. Try the order switch', M: lmul(SCL(1, 0.5), ROT(45 * RAD)) },
+  ];
+  let level = 0, matchT = 0, banner = '', bannerT = 0, cleared = 0, started = false;
+  const matchErr = (A, B) => Math.max(Math.abs(A.a - B.a), Math.abs(A.b - B.b), Math.abs(A.c - B.c), Math.abs(A.d - B.d));
+
+  function resetXform() { T.rot = 0; T.sx = 1; T.sy = 1; T.shx = 0; T.shy = 0; free = null; syncSliders(true); }
+  function nextLevel(skip) {
+    if (!skip) cleared++;
+    level++; matchT = 0; resetXform();
+    if (level >= LEVELS.length) { banner = `ALL ${LEVELS.length} POSES MATCHED  ·  free play`; bannerT = 4; }
+  }
+  function leaveFree() {            // sliders take over again, starting from the current free matrix's nearest settings
+    if (!free) return;
+    free = null;
+  }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VW, H / VH);
+    OX = (W - VW * S) / 2; OY = (H - VH * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { s: V(C.x + 150, C.y - 60), down: false, drag: null };
+  const toVirtual = e => { const r = canvas.getBoundingClientRect(); return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S); };
+  const toScreen = p => V(C.x + U * p.x, C.y + U * p.y);           // unit coordinates → screen
+  const toUnits = s => V((s.x - C.x) / U, (s.y - C.y) / U);          // screen → unit coordinates
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-4]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+    started = true;
+    if (e.repeat) { keys[k] = true; return; }
+    if (k === 'r') { resetXform(); }
+    if (k === 'f') { leaveFree(); T.sx = -T.sx; syncSliders(true); }
+    if (k === 'g') { leaveFree(); T.sy = -T.sy; syncSliders(true); }
+    if (k === 'o') { toggleOrder(); }
+    if (k === 'b') { settings.bounce = !settings.bounce; refreshControls(); }
+    if (k === 'n') { if (level < LEVELS.length) nextLevel(true); }
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.drag = null; });
+  const handleTips = () => { const m = baseM(); return [toScreen(V(m.a, m.b)), toScreen(V(m.c, m.d))]; };
+  canvas.addEventListener('pointermove', e => {
+    mouse.s = toVirtual(e);
+    if (mouse.drag !== null) {
+      const u = toUnits(mouse.s), q = V(clamp(u.x, -3, 3), clamp(u.y, -3, 3));
+      const m = free || baseM();
+      free = mouse.drag === 0 ? L2(q.x, q.y, m.c, m.d) : L2(m.a, m.b, q.x, q.y);
+      syncSliders(false);
+    }
+  });
+  canvas.addEventListener('pointerdown', e => {
+    mouse.s = toVirtual(e); started = true;
+    if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+    const tips = handleTips();
+    const d0 = len(sub(mouse.s, tips[0])), d1 = len(sub(mouse.s, tips[1]));
+    if (Math.min(d0, d1) < 22) { mouse.drag = d0 <= d1 ? 0 : 1; if (!free) free = baseM(); }
+  });
+  canvas.addEventListener('pointerup', () => { mouse.drag = null; });
+
+  // ---------- Panel: sliders ----------
+  const SL = { rot: 's-rot', sx: 's-sx', sy: 's-sy', shx: 's-shx', shy: 's-shy' };
+  const slEl = {}, outEl = {};
+  for (const k in SL) {
+    slEl[k] = document.getElementById(SL[k]); outEl[k] = document.getElementById('o-' + k);
+    slEl[k].addEventListener('input', () => { free = null; T[k] = parseFloat(slEl[k].value); syncSliders(false); });
+  }
+  function syncSliders(force) {
+    for (const k in SL) {
+      if (force || document.activeElement !== slEl[k]) slEl[k].value = T[k];
+      outEl[k].textContent = free ? '—' : (k === 'rot' ? f0(T[k]) + '°' : f2(T[k]));
+    }
+  }
+  const f0 = n => Math.round(n).toString();
+  function toggleOrder() { free = null; settings.scaleFirst = !settings.scaleFirst; refreshControls(); }
+  function refreshControls() {
+    document.getElementById('b-ord').textContent = settings.scaleFirst ? 'Order: S then R (O)' : 'Order: R then S (O)';
+    document.getElementById('b-bounce').textContent = settings.bounce ? 'Bounce: on (B)' : 'Bounce: off (B)';
+    if (selected) selected.btn && renderCard();
+  }
+  document.getElementById('b-fx').addEventListener('click', () => { leaveFree(); T.sx = -T.sx; syncSliders(true); });
+  document.getElementById('b-fy').addEventListener('click', () => { leaveFree(); T.sy = -T.sy; syncSliders(true); });
+  document.getElementById('b-ord').addEventListener('click', toggleOrder);
+  document.getElementById('b-bounce').addEventListener('click', () => { settings.bounce = !settings.bounce; refreshControls(); });
+  document.getElementById('b-reset').addEventListener('click', resetXform);
+  document.getElementById('b-skip').addEventListener('click', () => { if (level < LEVELS.length) nextLevel(true); });
+
+  // ---------- Update ----------
+  function update(dt) {
+    bounceT += dt;
+    const rate = dt;
+    let moved = false;
+    const hold = (kp, kn, f) => { const v = (keys[kp] ? 1 : 0) - (keys[kn] ? 1 : 0); if (v) { leaveFree(); f(v * rate); moved = true; } };
+    hold('e', 'q', v => { T.rot = ((T.rot + 90 * v + 180) % 360 + 360) % 360 - 180; });
+    hold('d', 'a', v => { T.sx = clamp(T.sx + 1.2 * v, -2.5, 2.5); });
+    hold('w', 's', v => { T.sy = clamp(T.sy + 1.2 * v, -2.5, 2.5); });
+    hold('x', 'z', v => { T.shx = clamp(T.shx + 1.0 * v, -1.5, 1.5); });
+    hold('v', 'c', v => { T.shy = clamp(T.shy + 1.0 * v, -1.5, 1.5); });
+    if (moved || free) syncSliders(false);
+    if (bannerT > 0) bannerT -= dt;
+    if (level < LEVELS.length) {
+      if (matchErr(baseM(), LEVELS[level].M) <= TOL) {
+        matchT += dt;
+        if (matchT > 0.9) { banner = `MATCHED  ·  ${LEVELS[level].name}`; bannerT = 1.8; nextLevel(false); }
+      } else matchT = 0;
+    }
+  }
+
+  // ---------- Drawing ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 2, dash) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw; if (dash) ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  function arrow(from, to, color, lw = 2.5, head = 9) {
+    const v = sub(to, from); if (len(v) < 2) return;
+    const a = Math.atan2(v.y, v.x);
+    line(from, to, color, lw);
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * head, to.y - Math.sin(a - .4) * head);
+    ctx.lineTo(to.x - Math.cos(a + .4) * head, to.y - Math.sin(a + .4) * head);
+    ctx.closePath(); ctx.fill();
+  }
+  function poly(pts, fill, stroke, lw = 2, dash) {
+    ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; if (dash) ctx.setLineDash(dash); ctx.stroke(); ctx.setLineDash([]); }
+  }
+  const mapPts = (A, pts) => pts.map(p => toScreen(lapply(A, p)));
+  function drawChar(A, alpha = 1, outlineOnly = false, color) {
+    ctx.globalAlpha = alpha;
+    for (const s of SHAPES) {
+      const q = mapPts(A, s.pts);
+      if (outlineOnly) poly(q, null, color || '#ffb547', 2, [6, 5]);
+      else poly(q, s.fill, s.stroke, 1.5);
+    }
+    ctx.globalAlpha = 1;
+  }
+  const UNIT_SQ = [V(0, 0), V(1, 0), V(1, 1), V(0, 1)];
+
+  function drawGrid(A, color, alpha) {          // the transformed grid: lines of x = i and y = j
+    ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = -6; i <= 6; i++) {
+      const a = toScreen(lapply(A, V(i, -6))), b = toScreen(lapply(A, V(i, 6)));
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      const c = toScreen(lapply(A, V(-6, i))), d = toScreen(lapply(A, V(6, i)));
+      ctx.moveTo(c.x, c.y); ctx.lineTo(d.x, d.y);
+    }
+    ctx.stroke(); ctx.globalAlpha = 1;
+  }
+
+  function matrixLines(A, rowConv) {
+    const M = rowConv ? L2(A.a, A.c, A.b, A.d) : A;      // row convention shows the transpose
+    return [`[ ${f2(M.a).padStart(6)} ${f2(M.c).padStart(6)} ]`, `[ ${f2(M.b).padStart(6)} ${f2(M.d).padStart(6)} ]`];
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
+    ctx.fillStyle = '#151a22'; ctx.fillRect(0, 0, VW, VH);
+
+    // Background grid (the untransformed plane)
+    ctx.strokeStyle = '#1d2330'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = C.x % U; x < VW; x += U) { ctx.moveTo(x, 0); ctx.lineTo(x, VH); }
+    for (let y = C.y % U; y < VH; y += U) { ctx.moveTo(0, y); ctx.lineTo(VW, y); }
+    ctx.stroke();
+    line(V(0, C.y), V(VW, C.y), '#3a4357', 1.5); line(V(C.x, 0), V(C.x, VH), '#3a4357', 1.5);
+
+    const A = curM(), B = baseM();
+    for (const l of LENSES) if (l.on && l.under) l.under(A, B);
+
+    // Target ghost
+    if (level < LEVELS.length && settings.showGhost) {
+      const ok = matchErr(B, LEVELS[level].M) <= TOL;
+      drawChar(LEVELS[level].M, ok ? 0.9 : 0.55, true, ok ? '#5fd18b' : '#ffb547');
+    }
+    drawChar(A, 1);
+    circle(C, 4, '#e6e9ef');
+
+    // Arrow tips: the two columns, always draggable
+    const m = B, tipX = toScreen(V(m.a, m.b)), tipY = toScreen(V(m.c, m.d));
+    arrow(C, tipX, '#ff6b6b', 2.5, 9); arrow(C, tipY, '#5fd18b', 2.5, 9);
+    circle(tipX, 7, null, '#ff6b6b', 2); circle(tipY, 7, null, '#5fd18b', 2);
+
+    for (const l of LENSES) if (l.on && l.over) l.over(A, B);
+
+    // HUD
+    const lines = matrixLines(B, settings.rowConv);
+    ctx.fillStyle = 'rgba(11,13,18,.82)'; ctx.fillRect(12, 12, 232, 100);
+    text(settings.rowConv ? 'M (row-vector convention)' : 'M = [ î′  ĵ′ ] (columns)', 22, 32, '#9aa3b2', 12);
+    text(lines[0], 22, 58, '#e6e9ef', 17); text(lines[1], 22, 82, '#e6e9ef', 17);
+    text(free ? 'free matrix (dragged)' : (settings.scaleFirst ? 'M = R · Sh · S' : 'M = S · Sh · R'), 22, 102, '#6cb8ff', 12);
+    text(`î′ = (${f2(B.a)}, ${f2(B.b)})`, 262, 32, '#ff6b6b', 13);
+    text(`ĵ′ = (${f2(B.c)}, ${f2(B.d)})`, 262, 52, '#5fd18b', 13);
+    if (level < LEVELS.length) {
+      const err = matchErr(B, LEVELS[level].M);
+      text(`pose ${level + 1}/${LEVELS.length}: ${LEVELS[level].name}`, VW - 16, 32, '#ffb547', 15, 'right');
+      text(LEVELS[level].hint, VW - 16, 52, '#9aa3b2', 12, 'right');
+      text(`distance to target ${f2(err)}   (match at ≤ ${TOL})`, VW - 16, 72, err <= TOL ? '#5fd18b' : '#9aa3b2', 12, 'right');
+    } else {
+      text('free play — every pose matched', VW - 16, 32, '#5fd18b', 15, 'right');
+    }
+    text(`matched ${cleared}`, VW - 16, VH - 14, '#9aa3b2', 12, 'right');
+    if (bannerT > 0) text(banner, C.x, 120, '#5fd18b', 22, 'center');
+    if (!started) {
+      ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, VW, VH);
+      text('TRANSFORM LAB', C.x, C.y - 40, '#e6e9ef', 28, 'center');
+      ['Make the character match each orange ghost pose.', 'Use the sliders, the keys, or drag the red and green arrow tips.',
+        'The matrix at the top left is the whole transformation.', 'Press any key or click to start']
+        .forEach((l, i) => text(l, C.x, C.y + i * 20, '#9aa3b2', 13, 'center'));
+    }
+    ctx.restore();
+  }
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'Columns', chap: 'Chapter 14.2–14.3',
+      formula: 'M = [ î′  ĵ′ ] = [ a  c ]\n                 [ b  d ]\nM (x, y) = x·î′ + y·ĵ′\nî′ = M(1, 0) = (a, b)\nĵ′ = M(0, 1) = (c, d)',
+      used: ['Rotating and scaling sprites', 'Flipping a character to face left', 'Isometric and oblique views', 'Reading a transform off a picture of the axes'],
+      tryThis: 'Drag the red tip to (0, 1) and the green tip to (−1, 0): the character turns a quarter circle, clockwise on this y-down screen. Then tick "row-vector convention": the numbers rearrange, the picture does not.',
+      controls: `<label><input type="checkbox" data-set="rowConv"> Show the row-vector convention (transpose)</label>`,
+      under(A, B) {
+        drawGrid(B, '#2f4a6d', 0.55);
+        poly(mapPts(ID, UNIT_SQ), null, '#9aa3b2', 1.5, [4, 4]);
+        poly(mapPts(B, UNIT_SQ), 'rgba(108,184,255,.18)', '#6cb8ff', 1.5);
+      },
+      over(A, B) {
+        const tx = toScreen(V(B.a, B.b)), ty = toScreen(V(B.c, B.d));
+        text('î′', tx.x + 10, tx.y - 8, '#ff6b6b', 14); text('ĵ′', ty.x + 10, ty.y - 8, '#5fd18b', 14);
+        text('(1, 0) → ' + P2(V(B.a, B.b)), tx.x + 10, tx.y + 10, '#ff6b6b', 11);
+        text('(0, 1) → ' + P2(V(B.c, B.d)), ty.x + 10, ty.y + 10, '#5fd18b', 11);
+      },
+      live() {
+        const B = baseM(), p = V(1, 0.5), q = lapply(B, p);
+        const rows = matrixLines(B, settings.rowConv);
+        return `${settings.rowConv ? 'row convention: p′ = p · Mᵀ' : 'column convention: p′ = M · p'}\n${rows[0]}\n${rows[1]}\nunit-square corners →\n (0,0) → (0.00, 0.00)\n (1,0) → ${P2(V(B.a, B.b))}\n (0,1) → ${P2(V(B.c, B.d))}\n (1,1) → ${P2(V(B.a + B.c, B.b + B.d))}\nsample p = (1.0, 0.5):\n 1.0·î′ + 0.5·ĵ′ = ${P2(q)}`;
+      },
+    },
+    {
+      name: 'Order', chap: 'Chapter 14.5',
+      formula: 'scale first:   M = R · Sh · S\nrotate first:  M = S · Sh · R\nM₂ M₁ p means "do M₁ first".\nR S ≠ S R   (unless S is uniform)',
+      used: ['Stretching a rotated sprite along screen axes vs its own axes', 'Isometric tiles: rotate 45°, then squash y', 'Squash and stretch on a spinning object', 'Putting a shear before or after a rotation'],
+      tryThis: 'Set scale x to 1.8 and rotate 45°. Toggle the order: the character is stretched along its own x-axis in one case, and along the screen x-axis in the other. The dashed outline shows the other order.',
+      controls: `<label><input type="checkbox" data-set="scaleFirst"> Scale first, then rotate (M = R · Sh · S)</label>`,
+      over(A, B) {
+        const R = ROT(T.rot * RAD), S = SCL(T.sx, T.sy), H = SHR(T.shx, T.shy);
+        const other = settings.scaleFirst ? lmul(S, lmul(H, R)) : lmul(R, lmul(H, S));
+        const mid = settings.scaleFirst ? lmul(H, S) : R;
+        if (!free) {
+          drawChar(other, 0.7, true, '#c792ea');
+          drawChar(mid, 0.55, true, '#9aa3b2');
+          text('other order', toScreen(lapply(other, V(1.35, 0.1))).x + 6, toScreen(lapply(other, V(1.35, 0.1))).y, '#c792ea', 11);
+          text(settings.scaleFirst ? 'after S, Sh' : 'after R', toScreen(lapply(mid, V(0, 0.95))).x + 8, toScreen(lapply(mid, V(0, 0.95))).y + 14, '#9aa3b2', 11);
+        } else text('order only applies to the sliders; reset to leave free mode', C.x, VH - 20, '#ff6b6b', 12, 'center');
+      },
+      live() {
+        const R = ROT(T.rot * RAD), S = SCL(T.sx, T.sy), H = SHR(T.shx, T.shy);
+        const a = lmul(R, lmul(H, S)), b = lmul(S, lmul(H, R));
+        const fm = A => `[${f2(A.a).padStart(6)} ${f2(A.c).padStart(6)}]\n [${f2(A.b).padStart(6)} ${f2(A.d).padStart(6)}]`;
+        return `R·Sh·S (scale first)\n ${fm(a)}\nS·Sh·R (rotate first)\n ${fm(b)}\ndifference ${f2(matchErr(a, b))}\nusing: ${settings.scaleFirst ? 'R·Sh·S' : 'S·Sh·R'}`;
+      },
+    },
+    {
+      name: 'Determinant', chap: 'Chapter 14.6',
+      formula: 'det M = a·d − b·c  (= î′ × ĵ′)\nunit-square area → |det M|\ndet < 0: mirrored (flipped)\ndet = 0: squashed to a line\nsquash & stretch: sx = 1/sy keeps det = 1',
+      used: ['Detecting that a sprite is mirrored', 'Area-preserving squash and stretch', 'Knowing a transform can be undone (det ≠ 0)', 'Back-face culling in 3D (the sign of a determinant)'],
+      tryThis: 'Press F: the determinant changes sign and the character faces left. Drag both arrow tips onto one line: det = 0 and the character collapses. Turn on Bounce, then untick "preserve area": the blob visibly gains and loses mass.',
+      controls: `<label><input type="checkbox" data-set="bounce"> Bounce animation (squash & stretch)</label>
+        <label><input type="checkbox" data-set="keepArea"> Preserve area while bouncing (sx = 1/sy)</label>`,
+      under(A, B) { poly(mapPts(A, UNIT_SQ), 'rgba(255,181,71,.16)', '#ffb547', 1.5); },
+      over(A, B) {
+        const d = det(A);
+        text(`det = ${f2(det(B))}`, C.x, VH - 38, Math.abs(d) < 0.05 ? '#ff6b6b' : '#ffb547', 18, 'center');
+        text(d < 0 ? 'mirrored' : 'not mirrored', C.x, VH - 18, d < 0 ? '#c792ea' : '#9aa3b2', 13, 'center');
+      },
+      live() {
+        const A = curM(), B = baseM(), d = det(B), da = det(A);
+        return `det M     = ${f3(B.a)}·${f3(B.d)} − ${f3(B.b)}·${f3(B.c)}\n          = ${f3(d)}\nunit square area × ${f3(Math.abs(d))}\norientation  ${d < 0 ? 'MIRRORED (det < 0)' : d === 0 ? 'degenerate' : 'preserved'}\nwith bounce det = ${f3(da)}\n  (area ${settings.keepArea ? 'preserved' : 'NOT preserved'} by the squash)\ncan be undone? ${Math.abs(d) < 0.02 ? 'NO — det ≈ 0' : 'yes, M⁻¹ exists'}`;
+      },
+    },
+    {
+      name: 'Inverse', chap: 'Chapter 14.7',
+      formula: 'local = M⁻¹ (screen − origin) ÷ 80\nM⁻¹ = 1/(ad−bc) · [ d  −c ]\n                  [ −b  a ]\nwrong: use M instead of M⁻¹',
+      used: ['Clicking on a rotated, scaled sprite', 'Mouse picking in a transformed layer', 'Undoing a transform (rewind, mirror back)', 'Texture lookup: where on the image does this pixel come from?'],
+      tryThis: 'Rotate and stretch the character, then hover its sword. The game applies M⁻¹ to the mouse to see which part you are on. Untick "Use the inverse" and apply M itself: the highlight lands in the wrong place whenever M is not the identity.',
+      controls: `<label><input type="checkbox" data-set="useInverse"> Use the inverse M⁻¹ (otherwise M)</label>`,
+      over(A, B) {
+        const mu = toUnits(mouse.s);
+        const Ai = Math.abs(det(A)) > 1e-4 ? linv(A) : null;
+        if (!Ai) { text('M is not invertible (det ≈ 0)', C.x, VH - 20, '#ff6b6b', 14, 'center'); return; }
+        const loc = settings.useInverse ? lapply(Ai, mu) : lapply(A, mu);
+        const good = lapply(Ai, mu);
+        const hit = hitName(loc);
+        // Highlight the part the game thinks is under the mouse
+        if (hit) for (const h of HITS) if (h.name === hit) {
+          const pts = mapPts(A, [V(h.r[0], h.r[1]), V(h.r[2], h.r[1]), V(h.r[2], h.r[3]), V(h.r[0], h.r[3])]);
+          poly(pts, 'rgba(255,181,71,.25)', '#ffb547', 2);
+        }
+        circle(mouse.s, 5, null, '#e6e9ef', 1.5);
+        text(`local ${P2(loc)}`, mouse.s.x + 12, mouse.s.y - 10, settings.useInverse ? '#ffb547' : '#ff6b6b', 12);
+        text(hit ? `picked: ${hit}` : 'picked: nothing', mouse.s.x + 12, mouse.s.y + 6, '#e6e9ef', 12);
+        if (!settings.useInverse) {
+          const wrongBack = toScreen(lapply(A, loc));
+          const trueHit = hitName(good);
+          line(mouse.s, toScreen(lapply(A, good)), 'rgba(95,209,139,.6)', 1.5, [4, 4]);
+          text(`should be: ${trueHit || 'nothing'}`, mouse.s.x + 12, mouse.s.y + 22, '#5fd18b', 12);
+        }
+      },
+      live() {
+        const A = curM();
+        if (Math.abs(det(A)) < 1e-4) return 'M is singular (det ≈ 0):\nno inverse exists.';
+        const Ai = linv(A), mu = toUnits(mouse.s), good = lapply(Ai, mu);
+        const fm = X => `[${f3(X.a).padStart(7)} ${f3(X.c).padStart(7)}]\n [${f3(X.b).padStart(7)} ${f3(X.d).padStart(7)}]`;
+        const check = lmul(Ai, A);
+        return `M\n ${fm(A)}\nM⁻¹\n ${fm(Ai)}\nM⁻¹·M = [${f2(check.a)} ${f2(check.c)}; ${f2(check.b)} ${f2(check.d)}]\nmouse (units)  ${P2(mu)}\nlocal = M⁻¹·mouse ${P2(good)}\npart under mouse: ${hitName(good) || 'none'}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel: lens card ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Match a pose or two first. Then press 1–4 to see the math behind the matrix: its columns, the order of operations, the determinant and the inverse.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      el.checked = settings[key];
+      el.addEventListener('input', () => { settings[key] = el.checked; if (key === 'scaleFirst') free = null; refreshControlsOnly(); });
+    });
+    updateLive();
+  }
+  function refreshControlsOnly() {
+    document.getElementById('b-ord').textContent = settings.scaleFirst ? 'Order: S then R (O)' : 'Order: R then S (O)';
+    document.getElementById('b-bounce').textContent = settings.bounce ? 'Bounce: on (B)' : 'Bounce: off (B)';
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+
+  resetXform();
+  refreshControls();
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

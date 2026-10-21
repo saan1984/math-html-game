@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spread Gun</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Spread Gun</h1>
+    <p class="sub">Survive six waves with a fan of pellets, between spinning blades. Every pellet and every blade is a rotated vector.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Aim</b> mouse · <b>Fire</b> hold mouse or Space ·
+      <b>Spread</b> Z / X or wheel · <b>Upgrade</b> Q (+1 pellet) / E (+15° spread) ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dist = (a, b) => len(sub(a, b));
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const RAD = Math.PI / 180;
+  const deg = r => r / RAD;
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const f3 = n => (Math.abs(n) < 0.0005 ? 0 : n).toFixed(3);
+  const vs = (v, f = f0) => `(${f(v.x)}, ${f(v.y)})`;
+
+  // Rotation by an angle whose cosine c and sine s are already known (Chapter 18.1)
+  //   x' = x·c − y·s,   y' = x·s + y·c
+  const rotCS = (v, c, s) => V(v.x * c - v.y * s, v.x * s + v.y * c);
+  const rot = (v, t) => rotCS(v, Math.cos(t), Math.sin(t));
+
+  const settings = {
+    pivot: true,      // rotate blades about their pivot (off = about the world origin)
+    renorm: true,     // re-normalize blade offsets after each small rotation
+  };
+  const PLAYER_SPEED = 220;
+  const PELLET_SPEED = 600;
+  const PELLET_LIFE = 0.55;          // 600 × 0.55 = 330 px range
+  const FIRE_INTERVAL = 0.32;
+  const MAX_PELLETS = 9;
+  const MAX_SPREAD = 120;
+  const BLADE_R = 16;
+  const KILLS_PER_UPGRADE = 8;
+  const WAVES = 6;
+
+  // ---------- Canvas ----------
+  const WORLD = { w: 1000, h: 700 };
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { pos: null, down: false };
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === 'q') upgrade('pellet');
+    if (k === 'e') upgrade('spread');
+    if (k === 'z') setSpread(gun.spread - 5);
+    if (k === 'x') setSpread(gun.spread + 5);
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+  function toWorld(e) {
+    const r = canvas.getBoundingClientRect();
+    return V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+  }
+  canvas.addEventListener('pointermove', e => { mouse.pos = toWorld(e); });
+  canvas.addEventListener('pointerdown', e => {
+    mouse.pos = toWorld(e);
+    if (!started) { started = true; return; }
+    if (state.over) { reset(); return; }
+    mouse.down = true;
+  });
+  addEventListener('pointerup', () => { mouse.down = false; });
+  canvas.addEventListener('wheel', e => { e.preventDefault(); setSpread(gun.spread + (e.deltaY > 0 ? -5 : 5)); }, { passive: false });
+
+  // ---------- State ----------
+  let state, player, gun, pellets, enemies, spinners, popups, lastFan;
+  let started = false, paused = false;
+
+  function makeSpinner(px, py, R, omega, count) {
+    const sp = { P: V(px, py), R, omega, blades: [], steps: 0 };
+    for (let i = 0; i < count; i++) {
+      const t = i * 2 * Math.PI / count;
+      sp.blades.push({ pos: add(sp.P, V(R * Math.cos(t), R * Math.sin(t))), spin: t });
+    }
+    return sp;
+  }
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, kills: 0, wave: 0, toSpawn: 0, spawnT: 0, waveT: 1.5, upgrades: 0 };
+    player = { pos: V(500, 650), r: 13, hearts: 3, hurt: 0, aim: V(0, -1) };
+    gun = { pellets: 3, spread: 30, maxSpread: 30, cd: 0 };
+    pellets = []; enemies = []; popups = []; lastFan = null;
+    spinners = [
+      makeSpinner(240, 210, 90, 2.5, 2),     // positive ω: clockwise on a y-down screen
+      makeSpinner(760, 210, 90, -2.5, 2),    // negative ω: counterclockwise
+      makeSpinner(500, 440, 110, 1.6, 3),
+    ];
+  }
+  function resetBlades() {
+    for (const sp of spinners) for (const b of sp.blades) {
+      const o = sub(b.pos, sp.P);
+      b.pos = add(sp.P, mul(len(o) > 0.001 ? norm(o) : V(1, 0), sp.R));
+    }
+  }
+
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.2 }); }
+  function setSpread(a) { gun.spread = clamp(a, 0, gun.maxSpread); }
+  function upgrade(kind) {
+    if (!state || state.upgrades <= 0 || state.over) return;
+    if (kind === 'pellet' && gun.pellets < MAX_PELLETS) { gun.pellets++; state.upgrades--; popup(V(player.pos.x, player.pos.y - 28), `+1 pellet (${gun.pellets})`, '#5fd18b'); }
+    if (kind === 'spread' && gun.maxSpread < MAX_SPREAD) { gun.maxSpread += 15; gun.spread = gun.maxSpread; state.upgrades--; popup(V(player.pos.x, player.pos.y - 28), `spread ${gun.maxSpread}°`, '#5fd18b'); }
+  }
+
+  // The spread fan: cos and sin of the step δ are computed ONCE, then reused (Chapter 18.3)
+  function fan(aim, n, spreadDeg) {
+    const a = spreadDeg * RAD;
+    if (n === 1) return { dirs: [aim], delta: 0, c: 1, s: 0, first: aim };
+    const delta = a / (n - 1);
+    const c = Math.cos(delta), s = Math.sin(delta);
+    const first = rot(aim, -a / 2);
+    const dirs = [first];
+    let d = first;
+    for (let i = 1; i < n; i++) { d = rotCS(d, c, s); dirs.push(d); }
+    return { dirs, delta, c, s, first };
+  }
+
+  function fire() {
+    const f = fan(player.aim, gun.pellets, gun.spread);
+    for (const d of f.dirs) pellets.push({ pos: add(player.pos, mul(d, player.r + 4)), vel: mul(d, PELLET_SPEED), life: PELLET_LIFE });
+    lastFan = { ...f, aim: player.aim, n: gun.pellets, spread: gun.spread };
+    gun.cd = FIRE_INTERVAL;
+  }
+
+  function spawnEnemy() {
+    const w = state.wave;
+    let p;
+    for (let tries = 0; tries < 20; tries++) {
+      const side = Math.floor(rand(0, 4));
+      p = side === 0 ? V(rand(30, 970), 20) : side === 1 ? V(rand(30, 970), 680) : side === 2 ? V(20, rand(30, 670)) : V(980, rand(30, 670));
+      if (dist(p, player.pos) > 260) break;
+    }
+    const roll = Math.random();
+    let e;
+    if (w >= 4 && roll < 0.15) e = { kind: 'brute', r: 22, hp: 8, speed: 52, color: '#b48cff' };
+    else if (w >= 3 && roll < 0.45) e = { kind: 'runner', r: 11, hp: 1, speed: 140, color: '#ffb547' };
+    else e = { kind: 'grunt', r: 14, hp: 2, speed: rand(70, 90), color: '#ff6b6b' };
+    e.pos = p; e.maxHp = e.hp; e.flash = 0;
+    enemies.push(e);
+  }
+
+  function hurtPlayer(src) {
+    if (player.hurt > 0 || state.over) return;
+    player.hearts--; player.hurt = 1.2;
+    popup(V(player.pos.x, player.pos.y - 28), src, '#ff6b6b');
+    if (player.hearts <= 0) state.over = 'lost';
+  }
+
+  function kill(e, by) {
+    e.dead = true; state.kills++; state.score += e.kind === 'brute' ? 50 : 10;
+    if (by === 'blade') popup(V(e.pos.x, e.pos.y - 16), 'shredded', '#9aa3b2');
+    if (state.kills % KILLS_PER_UPGRADE === 0) { state.upgrades++; popup(V(player.pos.x, player.pos.y - 44), 'UPGRADE: Q or E', '#5fd18b'); }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 24 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (state.over) return;
+    state.time += dt;
+
+    // Player
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    player.pos = add(player.pos, mul(norm(V(ix, iy)), PLAYER_SPEED * dt));
+    player.pos.x = clamp(player.pos.x, 20, WORLD.w - 20);
+    player.pos.y = clamp(player.pos.y, 20, WORLD.h - 20);
+    if (mouse.pos && dist(mouse.pos, player.pos) > 4) player.aim = norm(sub(mouse.pos, player.pos));
+    player.hurt -= dt;
+
+    gun.cd -= dt;
+    if ((mouse.down || keys[' ']) && gun.cd <= 0) fire();
+
+    // Spinning blades: one small rotation per frame, using the small-angle shortcut
+    //   cos θ ≈ 1, sin θ ≈ θ   — cheap, but each step stretches by √(1 + θ²)
+    for (const sp of spinners) {
+      const th = sp.omega * dt, c = 1, s = th;
+      sp.steps++;
+      for (const b of sp.blades) {
+        if (settings.pivot) {
+          let o = sub(b.pos, sp.P);                 // translate: pivot to the origin
+          o = rotCS(o, c, s);                       // rotate
+          if (settings.renorm) o = mul(norm(o), sp.R);
+          b.pos = add(sp.P, o);                     // translate back
+        } else {
+          const L = len(b.pos);
+          let p = rotCS(b.pos, c, s);               // BUG: rotates about the world origin (0, 0)
+          if (settings.renorm) p = mul(norm(p), L);
+          b.pos = p;
+        }
+        b.spin += 9 * dt;
+        if (dist(b.pos, player.pos) < BLADE_R + player.r) hurtPlayer('blade!');
+        for (const e of enemies) if (!e.dead && dist(b.pos, e.pos) < BLADE_R + e.r) kill(e, 'blade');
+      }
+    }
+
+    // Pellets
+    for (const p of pellets) {
+      p.pos = add(p.pos, mul(p.vel, dt));
+      p.life -= dt;
+      for (const e of enemies) {
+        if (e.dead || p.life <= 0) continue;
+        if (dist(p.pos, e.pos) < e.r + 4) {
+          p.life = 0; e.hp--; e.flash = 0.1;
+          if (e.hp <= 0) kill(e, 'gun');
+        }
+      }
+    }
+    pellets = pellets.filter(p => p.life > 0 && p.pos.x > -10 && p.pos.y > -10 && p.pos.x < WORLD.w + 10 && p.pos.y < WORLD.h + 10);
+
+    // Enemies walk straight at the player
+    for (const e of enemies) {
+      if (e.dead) continue;
+      e.flash -= dt;
+      e.pos = add(e.pos, mul(norm(sub(player.pos, e.pos)), e.speed * dt));
+      if (dist(e.pos, player.pos) < e.r + player.r) { e.dead = true; hurtPlayer('ouch!'); }
+    }
+    enemies = enemies.filter(e => !e.dead);
+
+    // Waves
+    if (state.toSpawn > 0) {
+      state.spawnT -= dt;
+      if (state.spawnT <= 0) { spawnEnemy(); state.toSpawn--; state.spawnT = Math.max(0.35, 0.95 - 0.1 * state.wave); }
+    } else if (enemies.length === 0) {
+      state.waveT -= dt;
+      if (state.waveT <= 0) {
+        if (state.wave >= WAVES) { state.over = 'won'; return; }
+        state.wave++; state.toSpawn = 6 + 4 * state.wave; state.spawnT = 0.5; state.waveT = 2;
+        popup(V(500, 330), `WAVE ${state.wave}`, '#6cb8ff');
+        if (state.wave > 1 && player.hearts < 3) { player.hearts++; popup(V(player.pos.x, player.pos.y - 28), '+1 heart', '#ff6b6b'); }
+      }
+    }
+  }
+
+  // ---------- Drawing ----------
+  function arrow(from, vec, color, label, lw = 2.5) {
+    const to = add(from, vec);
+    if (len(vec) < 2) return;
+    const a = Math.atan2(vec.y, vec.x);
+    ctx.strokeStyle = ctx.fillStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * 10, to.y - Math.sin(a - .4) * 10);
+    ctx.lineTo(to.x - Math.cos(a + .4) * 10, to.y - Math.sin(a + .4) * 10);
+    ctx.closePath(); ctx.fill();
+    if (label) text(label, to.x + 6, to.y - 6, color, 13);
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function dashed(on) { ctx.setLineDash(on ? [6, 6] : []); }
+  // Angle arc from direction a to direction b (both unit vectors), radius r
+  function arc(c, a, b, r, color) {
+    const t0 = Math.atan2(a.y, a.x), t1 = Math.atan2(b.y, b.x);
+    let d = Math.atan2(Math.sin(t1 - t0), Math.cos(t1 - t0));
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(c.x, c.y, r, t0, t0 + d, d < 0); ctx.stroke();
+  }
+
+  function drawBlade(b) {
+    ctx.save(); ctx.translate(b.pos.x, b.pos.y); ctx.rotate(b.spin);
+    ctx.fillStyle = '#c9d1dd'; ctx.strokeStyle = '#6b7385'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const r = i % 2 === 0 ? BLADE_R + 2 : 6, t = i * Math.PI / 4;
+      ctx.lineTo(Math.cos(t) * r, Math.sin(t) * r);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 50) { ctx.moveTo(x, 0); ctx.lineTo(x, WORLD.h); }
+    for (let y = 0; y <= WORLD.h; y += 50) { ctx.moveTo(0, y); ctx.lineTo(WORLD.w, y); }
+    ctx.stroke();
+
+    // Spinners: hub, chains and blades
+    for (const sp of spinners) {
+      ctx.strokeStyle = 'rgba(154,163,178,.35)'; ctx.lineWidth = 3;
+      for (const b of sp.blades) {
+        if (!settings.pivot) continue;
+        ctx.beginPath(); ctx.moveTo(sp.P.x, sp.P.y); ctx.lineTo(b.pos.x, b.pos.y); ctx.stroke();
+      }
+      circle(sp.P, 9, '#2b3242', '#6b7385', 2);
+      for (const b of sp.blades) drawBlade(b);
+    }
+
+    // Enemies
+    for (const e of enemies) {
+      circle(e.pos, e.r, e.flash > 0 ? '#ffffff' : '#2a1d24', e.color, 3);
+      if (e.maxHp > 2) {
+        ctx.fillStyle = '#1f2430'; ctx.fillRect(e.pos.x - 16, e.pos.y - e.r - 9, 32, 4);
+        ctx.fillStyle = e.color; ctx.fillRect(e.pos.x - 16, e.pos.y - e.r - 9, 32 * e.hp / e.maxHp, 4);
+      }
+    }
+
+    // Pellets
+    ctx.fillStyle = '#ffe28a';
+    for (const p of pellets) { ctx.beginPath(); ctx.arc(p.pos.x, p.pos.y, 4, 0, Math.PI * 2); ctx.fill(); }
+
+    // Player: a ship pointing along the aim vector (its outline is rotated with the same formula)
+    const blink = player.hurt > 0 && Math.floor(player.hurt * 12) % 2 === 0;
+    if (!blink) {
+      const c = player.aim.x, s = player.aim.y;          // cos and sin of the aim angle
+      const shape = [V(20, 0), V(-12, -12), V(-6, 0), V(-12, 12)].map(v => add(player.pos, rotCS(v, c, s)));
+      ctx.beginPath(); shape.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath();
+      ctx.fillStyle = '#2a5d8f'; ctx.fill(); ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 2.5; ctx.stroke();
+    }
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // HUD
+    text(`${'♥'.repeat(Math.max(0, player.hearts))}${'♡'.repeat(3 - Math.max(0, player.hearts))}`, 20, 32, '#ff6b6b', 20);
+    text(`wave ${state.wave}/${WAVES}   kills ${state.kills}   score ${state.score}   pellets ${gun.pellets}   spread ${gun.spread}° (max ${gun.maxSpread}°)`, 110, 30, '#9aa3b2', 13);
+    if (state.upgrades > 0) text(`UPGRADE READY ×${state.upgrades}:  Q = +1 pellet   E = +15° spread`, 20, 56, '#5fd18b', 13);
+    if (!settings.pivot || !settings.renorm) text(`${!settings.pivot ? 'blades rotate about (0, 0)!  ' : ''}${!settings.renorm ? 'no re-normalizing: blades drift' : ''}`, 20, WORLD.h - 14, '#ffb547', 13);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('SPREAD GUN', ['Survive 6 waves · blades shred enemies too', 'WASD move · mouse aim · hold mouse or Space to fire', 'Z / X narrow or widen the spread', 'Press any key to start']);
+    else if (state.over === 'lost') overlay('OUT OF HEARTS', [`wave ${state.wave} · ${state.kills} kills · score ${state.score}`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('ALL WAVES CLEARED', [`${state.time.toFixed(1)} s · ${state.kills} kills · score ${state.score}`, 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const currentFan = () => ({ ...fan(player.aim, gun.pellets, gun.spread), aim: player.aim, n: gun.pellets, spread: gun.spread });
+  const LENSES = [
+    {
+      name: 'Rotating a vector', chap: 'Chapter 18.1–18.2',
+      formula: "x' = x·cos θ − y·sin θ\ny' = x·sin θ + y·cos θ\ny-down screen: +θ turns clockwise",
+      used: ['Spread shots and shotgun pellets', 'Rotating sprite outlines and hitboxes',
+        'Turning a velocity when a ship steers', 'Offsetting a muzzle or a thruster from a ship'],
+      tryThis: 'Aim anywhere: the outer right pellet is the aim vector rotated by +half the spread, and it is always on the clockwise side.',
+      draw() {
+        const f = currentFan(), p = player.pos, half = f.spread / 2 * RAD;
+        const right = rot(f.aim, half);
+        arrow(p, mul(f.aim, 90), '#e6e9ef', 'â');
+        arrow(p, mul(right, 90), '#5fd18b', `rotated +${f1(f.spread / 2)}°`);
+        if (half > 0.01) arc(p, f.aim, right, 46, '#5fd18b');
+        // the ship's own outline is rotated by the aim angle too
+        ctx.strokeStyle = 'rgba(108,184,255,.6)'; ctx.lineWidth = 1; dashed(true);
+        ctx.beginPath(); ctx.moveTo(p.x - 40, p.y); ctx.lineTo(p.x + 40, p.y); ctx.moveTo(p.x, p.y - 40); ctx.lineTo(p.x, p.y + 40); ctx.stroke(); dashed(false);
+        text('+x', p.x + 44, p.y + 4, '#9aa3b2', 11); text('+y', p.x + 4, p.y + 52, '#9aa3b2', 11);
+      },
+      live() {
+        const a = player.aim, t = gun.spread / 2 * RAD, c = Math.cos(t), s = Math.sin(t);
+        const r = rotCS(a, c, s);
+        return `aim â = ${vs(a, f3)}  (${f1(deg(Math.atan2(a.y, a.x)))}°)\nθ = +${f1(gun.spread / 2)}°   cos θ = ${f3(c)}  sin θ = ${f3(s)}\n\nx' = ${f3(a.x)}·${f3(c)} − (${f3(a.y)})·${f3(s)}\n   = ${f3(r.x)}\ny' = ${f3(a.x)}·${f3(s)} + (${f3(a.y)})·${f3(c)}\n   = ${f3(r.y)}\n|rotated| = ${f3(len(r))}  (length kept)`;
+      },
+    },
+    {
+      name: 'Spread fan', chap: 'Chapter 18.3',
+      formula: 'δ = spread ÷ (n − 1)\nc = cos δ, s = sin δ   ← once\nd₀ = rotate(â, −spread/2)\ndᵢ₊₁ = (c·x − s·y, s·x + c·y)',
+      used: ['Shotguns and spread weapons', 'Bullet-hell fans and walls of shots',
+        'Cone attacks: breath weapons, sprays', 'Placing several items evenly along an arc'],
+      tryThis: 'Press Z and X to narrow and widen the fan. At 200 px the gap between pellets is about 200 × δ (in radians): wider than an enemy, and only one pellet can hit it.',
+      draw() {
+        const f = currentFan(), p = player.pos;
+        f.dirs.forEach((d, i) => {
+          ctx.strokeStyle = 'rgba(255,226,138,.35)'; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + d.x * 330, p.y + d.y * 330); ctx.stroke();
+          arrow(p, mul(d, 70), '#ffe28a', null, 2);
+          text(`d${'₀₁₂₃₄₅₆₇₈'[i]}`, p.x + d.x * 84 - 8, p.y + d.y * 84 + 4, '#ffe28a', 12);
+        });
+        dashed(true); circle(p, 200, null, 'rgba(255,226,138,.35)', 1); dashed(false);
+      },
+      live() {
+        const f = currentFan();
+        let s = `n = ${f.n}   spread = ${f.spread}°\nδ = ${f.spread}° ÷ ${Math.max(1, f.n - 1)} = ${f1(deg(f.delta))}°\nc = cos δ = ${f3(f.c)}\ns = sin δ = ${f3(f.s)}\n`;
+        f.dirs.forEach((d, i) => { s += `\nd${i} = ${vs(d, f3)}  ${f1(deg(Math.atan2(d.y, d.x)))}°`; });
+        s += `\n\ngap at 200 px ≈ 200 × ${f3(f.delta)} = ${f1(200 * f.delta)} px`;
+        return s;
+      },
+    },
+    {
+      name: 'Rotate about pivot', chap: 'Chapter 18.4',
+      formula: "p' = P + R(θ)(p − P)\n1. translate: o = p − P\n2. rotate:    o' = R(θ) o\n3. translate back: p' = P + o'",
+      used: ['Spinning blades, fans and platforms', 'Doors and levers that swing on a hinge',
+        'Orbiting shields and moons', 'Rotating a group of sprites around a center'],
+      tryThis: 'Untick "Rotate about pivot". The blades now rotate about the world origin, the top-left corner, and sweep across the whole arena. Tick it again to put them back.',
+      controls: '<label><input type="checkbox" data-set="pivot"> Rotate about pivot (off = about the origin)</label>',
+      draw() {
+        text('origin (0, 0)', 8, 16, '#ffb547', 12);
+        circle(V(0, 0), 5, '#ffb547');
+        for (const sp of spinners) {
+          dashed(true); circle(sp.P, sp.R, null, 'rgba(108,184,255,.5)', 1.5); dashed(false);
+          text(`P ${vs(sp.P)}`, sp.P.x + 12, sp.P.y - 12, '#6cb8ff', 12);
+          for (const b of sp.blades) {
+            if (settings.pivot) arrow(sp.P, sub(b.pos, sp.P), '#6cb8ff', null, 2);
+            else { ctx.strokeStyle = 'rgba(255,181,71,.5)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(b.pos.x, b.pos.y); ctx.stroke(); }
+          }
+        }
+      },
+      live() {
+        const sp = spinners[0], b = sp.blades[0], th = sp.omega / 60;
+        const o = sub(b.pos, sp.P);
+        return `blade A, spinner 1 (ω = ${sp.omega} rad/s)\nP     = ${vs(sp.P)}\np     = ${vs(b.pos)}\no = p − P = ${vs(o)}\nθ per frame at 60 fps = ${f3(th)} rad\n\nmode: ${settings.pivot ? 'about the pivot ✓' : 'about the ORIGIN (bug)'}\ndistance to pivot ${f0(len(o))} (should be ${sp.R})`;
+      },
+    },
+    {
+      name: 'Complex numbers', chap: 'Chapter 18.5',
+      formula: 'z = x + iy,   i² = −1\nw = cos θ + i·sin θ\nz·w = (x·c − y·s) + i(x·s + y·c)\nturn by α, then β:  multiply by w_α·w_β',
+      used: ['Storing a 2D rotation as one number (c, s)', 'Composing turns by multiplying',
+        'Spin and orientation in 2D physics', 'The 2D model for quaternions (Chapter 20)'],
+      tryThis: 'Every pellet direction is d₀·wⁱ: start at d₀ and multiply by the same w each time. Watch |w| stay at 1.000.',
+      draw() {
+        const f = currentFan(), p = player.pos;
+        const w = V(f.c, f.s);
+        f.dirs.forEach((d, i) => text(i === 0 ? 'd₀' : `d₀·w${'⁰¹²³⁴⁵⁶⁷⁸'[i]}`, p.x + d.x * 96 - 10, p.y + d.y * 96 + 4, '#b48cff', 12));
+        f.dirs.forEach(d => arrow(p, mul(d, 70), '#b48cff', null, 2));
+        text(`w = ${f3(w.x)} + ${f3(w.y)}i`, p.x - 60, p.y + 46, '#b48cff', 12);
+      },
+      live() {
+        const f = currentFan(), a = f.aim;
+        const n = Math.max(1, f.n - 1);
+        // w^(n−1) by repeated multiplication equals the rotation by the whole spread
+        let z = V(1, 0); const w = V(f.c, f.s);
+        for (let i = 0; i < n; i++) z = V(z.x * w.x - z.y * w.y, z.x * w.y + z.y * w.x);
+        return `aim as a complex number\n â = ${f3(a.x)} + ${f3(a.y)}i\nw = cos δ + i sin δ = ${f3(w.x)} + ${f3(w.y)}i\n|w| = ${f3(len(w))}\n\nw^${n} = ${f3(z.x)} + ${f3(z.y)}i\ncos ${f.spread}° + i sin ${f.spread}° = ${f3(Math.cos(f.spread * RAD))} + ${f3(Math.sin(f.spread * RAD))}i\n(${n} turns of δ = one turn of the spread)`;
+      },
+    },
+    {
+      name: 'Drift & re-normalize', chap: 'Chapter 18.6',
+      formula: 'small step: cos θ ≈ 1, sin θ ≈ θ\n|step| = √(1 + θ²) > 1\nafter k steps: r × (1 + θ²)^(k/2)\nfix: o ← o × (r ÷ |o|)',
+      used: ['Anything rotated a little every frame', 'Orbits, spinning hazards, turning ships',
+        'Accumulated camera and object orientations', 'Quaternions too: re-normalize them (Chapter 20)'],
+      tryThis: 'Untick "Re-normalize". The blades spiral outward, about 5% further every second at 60 fps, until they leave the arena. Tick it again: they snap back to their circles.',
+      controls: '<label><input type="checkbox" data-set="renorm"> Re-normalize after each step</label>',
+      draw() {
+        for (const sp of spinners) {
+          dashed(true); circle(sp.P, sp.R, null, 'rgba(95,209,139,.7)', 1.5); dashed(false);
+          for (const b of sp.blades) {
+            const d = len(sub(b.pos, sp.P));
+            if (settings.pivot) text(`|o| ${f0(d)}`, b.pos.x + 18, b.pos.y - 14, Math.abs(d - sp.R) < 1 ? '#5fd18b' : '#ffb547', 12);
+          }
+        }
+      },
+      live() {
+        const sp = spinners[0], b = sp.blades[0];
+        const th = sp.omega / 60, grow = Math.sqrt(1 + th * th);
+        const o = len(sub(b.pos, sp.P));
+        return `spinner 1: ω = ${sp.omega} rad/s, r = ${sp.R}\nθ per frame (60 fps) = ${f3(th)} rad\n|step| = √(1 + θ²) = ${(grow).toFixed(6)}\nper second: ${(Math.pow(grow, 60)).toFixed(4)}×\n\nblade |o| now = ${f1(o)}\nre-normalize: ${settings.renorm ? 'ON, |o| held at r' : 'OFF, |o| keeps growing'}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a wave first. Then press 1–5 to see the rotations behind every pellet and blade.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (key === 'pivot' && settings.pivot) resetBlades();
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+
+  // ---------- Loop ----------
+  reset();
+  renderCard();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

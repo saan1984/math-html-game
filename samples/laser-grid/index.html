@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laser Grid</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Laser Grid</h1>
+    <p class="sub">Collect 25 orbs while lasers sweep and spin around you. Every hit is decided by a distance to a shape.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Aim</b> mouse · <b>Zap</b> Space or click ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y);
+  const sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (a, s) => V(a.x * s, a.y * s);
+  const dot = (a, b) => a.x * b.x + a.y * b.y;
+  const len = a => Math.hypot(a.x, a.y);
+  const norm = a => { const l = len(a); return l > 0 ? V(a.x / l, a.y / l) : V(); };
+  const dist = (a, b) => len(sub(a, b));
+  const fromAngle = (t, r = 1) => V(Math.cos(t) * r, Math.sin(t) * r);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const vs = (v, f = f0) => `(${f(v.x)}, ${f(v.y)})`;
+
+  const settings = {
+    clampT: true,     // the pitfall when false: every laser becomes an infinite line
+    assist: true,     // aim assist for the zap
+  };
+  const WORLD = { w: 1000, h: 700 };
+  const CENTER = V(500, 350);
+  const PLAYER_R = 12, PLAYER_SPEED = 210;
+  const BEAM_R = 4;          // laser beams are capsules of radius 4
+  const BAR_R = 16;          // the plasma bar is a capsule of radius 16
+  const ORB_R = 9, PICKUP = 30;
+  const MINE_R = 13;
+  const ZAP_RANGE = 380, ZAP_R = 3, ASSIST = 60, ZAP_COOLDOWN = 0.45;
+  const GOAL = 25, HEARTS = 3, INVULN = 1.2;
+
+  // ---------- Shapes and distances (this chapter) ----------
+  // Closest point on segment a→b: project, then clamp t to 0–1
+  function closestOnSeg(p, a, b, clampT = settings.clampT) {
+    const ab = sub(b, a), L2 = dot(ab, ab);
+    const t = L2 > 0 ? dot(sub(p, a), ab) / L2 : 0;
+    const tc = clampT ? clamp(t, 0, 1) : t;
+    const q = add(a, mul(ab, tc));
+    return { t, tc, q, d: dist(p, q) };
+  }
+  // Closest point on an axis-aligned box: clamp each axis
+  const closestOnBox = (p, b) => V(clamp(p.x, b.x0, b.x1), clamp(p.y, b.y0, b.y1));
+  // Signed distance to the line n̂ · p = c
+  const signedDist = (p, n, c) => dot(n, p) - c;
+
+  function pushOutOfBox(o, r, b) {
+    const q = closestOnBox(o.pos, b), d = dist(q, o.pos);
+    if (d >= r) return;
+    if (d > 0) { o.pos = add(q, mul(sub(o.pos, q), r / d)); return; }
+    // center inside: leave through the nearest face
+    const pen = [o.pos.x - b.x0, b.x1 - o.pos.x, o.pos.y - b.y0, b.y1 - o.pos.y];
+    const k = pen.indexOf(Math.min(...pen));
+    if (k === 0) o.pos.x = b.x0 - r; else if (k === 1) o.pos.x = b.x1 + r;
+    else if (k === 2) o.pos.y = b.y0 - r; else o.pos.y = b.y1 + r;
+  }
+
+  // ---------- Level ----------
+  const boxes = [
+    { x0: 140, y0: 440, x1: 220, y1: 520 },
+    { x0: 430, y0: 560, x1: 550, y1: 620 },
+    { x0: 820, y0: 140, x1: 880, y1: 240 },
+  ];
+  // Every laser is a segment a→b with a radius r (a capsule). unlock = orbs needed.
+  function makeLasers() {
+    return [
+      { name: 'big rotor', kind: 'rotor', unlock: 0, r: BEAM_R, c: V(500, 350), L: 230, w: 0.5, ph: 0.3, both: true },
+      { name: 'arm', kind: 'rotor', unlock: 0, r: BEAM_R, c: V(210, 190), L: 150, w: -0.9, ph: 0, both: false },
+      { name: 'sweeper', kind: 'sweep', unlock: 0, r: BEAM_R, a0: V(760, 430), b0: V(760, 680), dir: V(1, 0), amp: 170, w: 0.6, ph: 0 },
+      { name: 'gate', kind: 'pulse', unlock: 5, r: BEAM_R, a0: V(620, 40), b0: V(300, 280), period: 4.4, ph: 0 },
+      { name: 'floor gate', kind: 'pulse', unlock: 5, r: BEAM_R, a0: V(20, 610), b0: V(330, 610), period: 4.4, ph: 2.2 },
+      { name: 'plasma bar', kind: 'bar', unlock: 10, r: BAR_R, L: 80 },
+      { name: 'cross rotor', kind: 'rotor', unlock: 20, r: BEAM_R, c: V(500, 350), L: 230, w: 0.5, ph: 0.3 + Math.PI / 2, both: true },
+    ].map(l => Object.assign(l, { a: V(), b: V(), on: false, warn: false, unlocked: false, appear: 0 }));
+  }
+  function updateLaser(l, t) {
+    if (l.kind === 'rotor') {
+      const u = fromAngle(l.ph + l.w * t, l.L);
+      l.a = l.both ? sub(l.c, u) : V(l.c.x, l.c.y); l.b = add(l.c, u); l.on = true; l.warn = false;
+    } else if (l.kind === 'sweep') {
+      const o = mul(l.dir, l.amp * Math.sin(l.w * t + l.ph));
+      l.a = add(l.a0, o); l.b = add(l.b0, o); l.on = true; l.warn = false;
+    } else if (l.kind === 'pulse') {
+      const ph = ((t + l.ph) % l.period) / l.period;       // 0–0.5 on, 0.5–1 off
+      l.a = l.a0; l.b = l.b0; l.on = ph < 0.5; l.warn = ph >= 0.84;
+    } else if (l.kind === 'bar') {
+      const c = V(500 + 300 * Math.sin(0.23 * t), 350 + 200 * Math.sin(0.37 * t + 1));
+      const u = fromAngle(0.4 * t, l.L);
+      l.a = sub(c, u); l.b = add(c, u); l.on = true; l.warn = false;
+    }
+    if (l.appear > 0) { l.warn = true; }
+  }
+  const live = l => l.unlocked && l.on && l.appear <= 0;
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  let mouse = V(500, 350), mouseSeen = false;
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) { started = true; keys[k] = true; return; }
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === ' ' && !e.repeat && !state.over && !paused) zap();
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointermove', e => {
+    const r = canvas.getBoundingClientRect();
+    mouse = V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+    mouseSeen = true;
+  });
+  canvas.addEventListener('pointerdown', e => {
+    const r = canvas.getBoundingClientRect();
+    mouse = V((e.clientX - r.left - OX) / S, (e.clientY - r.top - OY) / S);
+    mouseSeen = true;
+    if (!started) { started = true; return; }
+    if (state.over) { reset(); return; }
+    if (!paused) zap();
+  });
+
+  // ---------- State ----------
+  let state, player, lasers, orbs, mines, popups, zaps, curtain, lastHit;
+  let started = false, paused = false;
+
+  function reset() {
+    state = { over: null, time: 0, lt: 0, score: 0, orbs: 0, zapped: 0, lasered: 0, mineTimer: 6 };
+    player = { pos: V(110, 640), vel: V(), facing: V(1, 0), hearts: HEARTS, inv: 0, cd: 0, push: V() };
+    lasers = makeLasers();
+    orbs = []; mines = []; popups = []; zaps = []; lastHit = null;
+    curtain = { on: false, ang: -2.3, D: 900, n: V(1, 0), c: -900, t: 0 };
+    for (const l of lasers) updateLaser(l, 0);
+    unlock();
+    spawnOrb(V(260, 600)); spawnOrb();
+  }
+
+  function unlock() {
+    for (const l of lasers) if (!l.unlocked && state.orbs >= l.unlock) {
+      l.unlocked = true;
+      if (state.time > 0) { l.appear = 1.6; popup(add(l.a, mul(sub(l.b, l.a), 0.5)), `new ${l.name}!`, '#ff6b6b'); }
+    }
+    if (!curtain.on && state.orbs >= 15) { curtain.on = true; popup(V(500, 60), 'the curtain is closing in', '#ffb547'); }
+  }
+
+  function safeSpot(p, margin) {
+    for (const b of boxes) if (dist(p, closestOnBox(p, b)) < margin) return false;
+    for (const l of lasers) if (l.unlocked && closestOnSeg(p, l.a, l.b, true).d < l.r + margin) return false;
+    if (curtain.on && signedDist(p, curtain.n, curtain.c) < 70) return false;
+    return true;
+  }
+  function spawnOrb(at) {
+    let p = at;
+    for (let i = 0; !p && i < 60; i++) {
+      const q = V(rand(60, WORLD.w - 60), rand(60, WORLD.h - 60));
+      if (dist(q, player.pos) > 160 && safeSpot(q, 34) && orbs.every(o => dist(o.pos, q) > 200)) p = q;
+    }
+    if (!p) p = V(rand(80, WORLD.w - 80), rand(80, WORLD.h - 80));
+    orbs.push({ pos: p, t: rand(0, 6) });
+  }
+  function spawnMine() {
+    for (let i = 0; i < 30; i++) {
+      const s = rand(0, 4), e = Math.floor(s), f = s - e;
+      const p = e === 0 ? V(30 + f * 940, 30) : e === 1 ? V(970, 30 + f * 640) : e === 2 ? V(30 + f * 940, 670) : V(30, 30 + f * 640);
+      if (dist(p, player.pos) > 280) { mines.push({ pos: p, speed: 62 + state.orbs * 1.6, born: 0 }); return; }
+    }
+  }
+  function popup(pos, text, color) { popups.push({ pos: V(pos.x, pos.y), text, color, life: 1.3 }); }
+
+  function aimDir() {
+    if (mouseSeen) { const d = sub(mouse, player.pos); if (len(d) > 4) return norm(d); }
+    return player.facing;
+  }
+  // Aim assist: the mine closest to the aim RAY (t ≥ 0) within ASSIST px of it
+  function aimQuery() {
+    const u = aimDir(), list = [];
+    let pick = null;
+    for (const m of mines) {
+      const w = sub(m.pos, player.pos), t = dot(w, u);
+      const perp = len(sub(w, mul(u, t)));
+      const ok = t >= 0 && t <= ZAP_RANGE + MINE_R && perp <= (settings.assist ? ASSIST : MINE_R + ZAP_R);
+      list.push({ m, t, perp, ok });
+      if (ok && (!pick || (settings.assist ? perp < pick.perp : t < pick.t))) pick = list[list.length - 1];
+    }
+    return { u, list, pick };
+  }
+  function zap() {
+    if (player.cd > 0) return;
+    player.cd = ZAP_COOLDOWN;
+    const q = aimQuery();
+    if (q.pick) {
+      const m = q.pick.m;
+      zaps.push({ a: V(player.pos.x, player.pos.y), b: V(m.pos.x, m.pos.y), life: 0.18, hit: true });
+      m.dead = true; state.zapped++; state.score += 50;
+      popup(V(m.pos.x, m.pos.y - 18), settings.assist ? `+50  ${f0(q.pick.perp)} px off the ray` : '+50', '#6cb8ff');
+    } else {
+      zaps.push({ a: V(player.pos.x, player.pos.y), b: add(player.pos, mul(q.u, ZAP_RANGE)), life: 0.12, hit: false });
+    }
+  }
+
+  function hurt(from, what) {
+    if (player.inv > 0 || state.over) return;
+    player.hearts--; player.inv = INVULN;
+    player.push = mul(norm(sub(player.pos, from)), 260);
+    lastHit = what;
+    popup(V(player.pos.x, player.pos.y - 26), `HIT (${what})`, '#ff6b6b');
+    if (player.hearts <= 0) state.over = 'lost';
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.pos.y -= 22 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    for (const z of zaps) z.life -= dt;
+    zaps = zaps.filter(z => z.life > 0);
+    if (state.over) return;
+    state.time += dt;
+    const speedMul = state.orbs >= 20 ? 1.3 : 1;
+    state.lt += dt * speedMul;
+    for (const l of lasers) { if (l.appear > 0) l.appear -= dt; updateLaser(l, state.lt); }
+
+    // Curtain: a half-plane n̂ · p − c < 0 that slowly turns and breathes
+    if (curtain.on) {
+      curtain.t += dt;
+      curtain.ang += 0.12 * dt;
+      const target = 230 + 80 * Math.cos(0.35 * curtain.t);
+      curtain.D += (target - curtain.D) * (1 - Math.exp(-0.8 * dt));
+    }
+    curtain.n = fromAngle(curtain.ang);
+    curtain.c = dot(curtain.n, CENTER) - curtain.D;          // center is D on the safe side
+
+    // Player
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    const input = norm(V(ix, iy));
+    if (ix || iy) player.facing = input;
+    player.vel = add(mul(input, PLAYER_SPEED), player.push);
+    player.pos = add(player.pos, mul(player.vel, dt));
+    player.push = mul(player.push, Math.exp(-7 * dt));
+    // Arena walls are four lines: keep n̂ · p − c ≥ r for each
+    player.pos.x = clamp(player.pos.x, PLAYER_R, WORLD.w - PLAYER_R);
+    player.pos.y = clamp(player.pos.y, PLAYER_R, WORLD.h - PLAYER_R);
+    for (const b of boxes) pushOutOfBox(player, PLAYER_R, b);
+    player.inv -= dt; player.cd -= dt;
+
+    // Lasers: hit if the distance to the segment is less than r_laser + r_player
+    for (const l of lasers) {
+      if (!live(l)) continue;
+      const c = closestOnSeg(player.pos, l.a, l.b);
+      if (c.d < l.r + PLAYER_R) hurt(c.q, l.name);
+    }
+    if (curtain.on && signedDist(player.pos, curtain.n, curtain.c) < PLAYER_R) {
+      hurt(sub(player.pos, curtain.n), 'curtain');
+    }
+
+    // Mines chase; lasers and the curtain destroy them; touching one hurts
+    state.mineTimer -= dt;
+    const maxMines = 2 + Math.floor(state.orbs / 6);
+    if (state.mineTimer <= 0) {
+      if (mines.length < maxMines) spawnMine();
+      state.mineTimer = Math.max(3.5, 8 - state.orbs * 0.18);
+    }
+    for (const m of mines) {
+      m.born += dt;
+      m.pos = add(m.pos, mul(norm(sub(player.pos, m.pos)), m.speed * dt));
+      for (const b of boxes) pushOutOfBox(m, MINE_R, b);
+      if (m.born < 1) continue;
+      for (const l of lasers) {
+        if (live(l) && closestOnSeg(m.pos, l.a, l.b).d < l.r + MINE_R) {
+          m.dead = true; state.lasered++; state.score += 75;
+          popup(V(m.pos.x, m.pos.y - 16), '+75 lasered!', '#ffb547'); break;
+        }
+      }
+      if (!m.dead && curtain.on && signedDist(m.pos, curtain.n, curtain.c) < -MINE_R) {
+        m.dead = true; popup(V(m.pos.x, m.pos.y - 16), 'fizzled', '#9aa3b2');
+      }
+      if (!m.dead && dist(m.pos, player.pos) < MINE_R + PLAYER_R) { m.dead = true; hurt(m.pos, 'mine'); }
+    }
+    mines = mines.filter(m => !m.dead);
+
+    // Orbs: collect inside the pickup radius
+    for (const o of orbs) {
+      o.t += dt;
+      if (dist(o.pos, player.pos) < PICKUP) {
+        o.taken = true; state.orbs++; state.score += 100;
+        popup(V(o.pos.x, o.pos.y - 14), `+100  (${state.orbs}/${GOAL})`, '#5fd18b');
+      }
+    }
+    orbs = orbs.filter(o => !o.taken);
+    if (state.orbs >= GOAL) { state.over = 'won'; state.score += player.hearts * 250; return; }
+    unlock();
+    while (orbs.length < 2) spawnOrb();
+  }
+
+  // ---------- Drawing ----------
+  function arrow(from, vec, color, label, lw = 2.5) {
+    const to = add(from, vec);
+    if (len(vec) < 2) return;
+    const a = Math.atan2(vec.y, vec.x);
+    ctx.strokeStyle = ctx.fillStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(to.x, to.y);
+    ctx.lineTo(to.x - Math.cos(a - .4) * 10, to.y - Math.sin(a - .4) * 10);
+    ctx.lineTo(to.x - Math.cos(a + .4) * 10, to.y - Math.sin(a + .4) * 10);
+    ctx.closePath(); ctx.fill();
+    if (label) text(label, to.x + 6, to.y - 6, color, 13);
+  }
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(p, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(a, b, color, lw = 1.5, dash) {
+    ctx.setLineDash(dash || []);
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Outline of a capsule: all points within r of segment a→b
+  function capsulePath(a, b, r) {
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, r, ang - Math.PI / 2, ang + Math.PI / 2);
+    ctx.arc(a.x, a.y, r, ang + Math.PI / 2, ang + Math.PI * 1.5);
+    ctx.closePath();
+  }
+  // The part of the world rectangle where n̂ · p − c < 0 (clip the rectangle by one line)
+  function hotPolygon() {
+    const R = [V(0, 0), V(WORLD.w, 0), V(WORLD.w, WORLD.h), V(0, WORLD.h)], out = [];
+    for (let i = 0; i < 4; i++) {
+      const p = R[i], q = R[(i + 1) % 4];
+      const sp = signedDist(p, curtain.n, curtain.c), sq = signedDist(q, curtain.n, curtain.c);
+      if (sp < 0) out.push(p);
+      if ((sp < 0) !== (sq < 0)) out.push(add(p, mul(sub(q, p), sp / (sp - sq))));
+    }
+    return out;
+  }
+  function infiniteEnds(l) {
+    const u = norm(sub(l.b, l.a));
+    return [sub(l.a, mul(u, 1400)), add(l.b, mul(u, 1400))];
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, WORLD.w, WORLD.h); ctx.clip();
+
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x <= WORLD.w; x += 50) { ctx.moveTo(x, 0); ctx.lineTo(x, WORLD.h); }
+    for (let y = 0; y <= WORLD.h; y += 50) { ctx.moveTo(0, y); ctx.lineTo(WORLD.w, y); }
+    ctx.stroke();
+
+    // Curtain (half-plane)
+    if (curtain.on) {
+      const poly = hotPolygon();
+      if (poly.length > 2) {
+        ctx.beginPath(); ctx.moveTo(poly[0].x, poly[0].y);
+        for (const p of poly) ctx.lineTo(p.x, p.y);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(255,181,71,${0.13 + 0.04 * Math.sin(state.time * 5)})`; ctx.fill();
+      }
+      const foot = sub(CENTER, mul(curtain.n, curtain.D));
+      const t = V(-curtain.n.y, curtain.n.x);
+      line(sub(foot, mul(t, 1300)), add(foot, mul(t, 1300)), '#ffb547', 2);
+    }
+
+    // Pillars (boxes)
+    for (const b of boxes) {
+      ctx.fillStyle = '#2b3242'; ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+      ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 2; ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    }
+
+    // Orbs
+    for (const o of orbs) {
+      const p = V(o.pos.x, o.pos.y + Math.sin(o.t * 3) * 3);
+      circle(p, ORB_R + 5, 'rgba(95,209,139,.15)');
+      circle(p, ORB_R, '#5fd18b', '#1f7a45', 2);
+    }
+
+    // Lasers
+    ctx.lineCap = 'round';
+    for (const l of lasers) {
+      if (!l.unlocked) continue;
+      if (l.kind === 'pulse') {
+        for (const e of [l.a, l.b]) { ctx.fillStyle = '#5a2b33'; ctx.fillRect(e.x - 7, e.y - 7, 14, 14); }
+      }
+      if (l.kind === 'rotor') circle(l.c, 6, '#5a2b33', '#ff6b6b', 2);
+      if (live(l)) {
+        const col = l.kind === 'bar' ? '180,140,255' : '255,90,90';
+        ctx.strokeStyle = `rgba(${col},.25)`; ctx.lineWidth = l.r * 2 + 8;
+        ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke();
+        ctx.strokeStyle = `rgba(${col},.95)`; ctx.lineWidth = l.r * 2;
+        ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke();
+        ctx.strokeStyle = '#ffe9e9'; ctx.lineWidth = Math.min(2, l.r);
+        ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke();
+      } else if (l.warn) {
+        line(l.a, l.b, l.kind === 'bar' ? 'rgba(180,140,255,.6)' : 'rgba(255,107,107,.6)', 2, [6, 6]);
+      }
+    }
+    ctx.lineCap = 'butt';
+
+    // Mines
+    for (const m of mines) {
+      const spin = state.time * 4;
+      circle(m.pos, MINE_R, '#3b2a20', '#ffb547', 2.5);
+      for (let k = 0; k < 4; k++) {
+        const d = fromAngle(spin + k * Math.PI / 2);
+        line(add(m.pos, mul(d, MINE_R)), add(m.pos, mul(d, MINE_R + 5)), '#ffb547', 2);
+      }
+    }
+
+    // Zaps
+    for (const z of zaps) line(z.a, z.b, z.hit ? `rgba(108,184,255,${z.life * 5})` : `rgba(108,184,255,${z.life * 3})`, z.hit ? 4 : 2);
+
+    // Player and aim
+    const blink = player.inv > 0 && Math.floor(player.inv * 12) % 2 === 0;
+    if (!blink) circle(player.pos, PLAYER_R, '#2a5d8f', '#6cb8ff', 3);
+    const u = aimDir();
+    line(add(player.pos, mul(u, PLAYER_R + 3)), add(player.pos, mul(u, PLAYER_R + 12)), '#6cb8ff', 3);
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.pos.x, p.pos.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+    ctx.strokeStyle = '#2b3242'; ctx.lineWidth = 2; ctx.strokeRect(1, 1, WORLD.w - 2, WORLD.h - 2);
+
+    // HUD
+    text(`${'♥'.repeat(Math.max(0, player.hearts))}${'♡'.repeat(HEARTS - Math.max(0, player.hearts))}`, 16, 30, '#ff6b6b', 20);
+    text(`orbs ${state.orbs}/${GOAL}   score ${state.score}   time ${state.time.toFixed(1)}s   zap ${player.cd > 0 ? '…' : 'ready'}`, 110, 27, '#9aa3b2', 13);
+    if (!settings.clampT) text('CLAMP t IS OFF: every laser is an infinite line', 500, 690, '#ff6b6b', 13, 'center');
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('LASER GRID', ['Collect 25 orbs · dodge every laser · zap the mines', 'WASD to move · aim with the mouse · Space or click to zap', 'Press any key to start']);
+    else if (state.over === 'lost') overlay('FRIED', [`${state.orbs}/${GOAL} orbs · score ${state.score} · last hit: ${lastHit}`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('GRID CLEARED', [`score ${state.score} · ${state.time.toFixed(1)} s · ${state.zapped} zapped · ${state.lasered} lasered`, 'Press R or click to play again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  function nearestLaser() {
+    let best = null;
+    for (const l of lasers) {
+      if (!l.unlocked || (!l.on && !l.warn)) continue;
+      const c = closestOnSeg(player.pos, l.a, l.b);
+      if (!best || c.d - l.r < best.c.d - best.l.r) best = { l, c };
+    }
+    return best;
+  }
+  function nearestOf(list) {
+    let best = null, bd = Infinity;
+    for (const o of list) { const d2 = dot(sub(o.pos, player.pos), sub(o.pos, player.pos)); if (d2 < bd) { bd = d2; best = o; } }
+    return best ? { o: best, d2: bd } : null;
+  }
+  const LENSES = [
+    {
+      name: 'Closest points', chap: 'Chapter 21.3–21.4',
+      formula: 't = (p − a)·(b − a) / |b − a|²\nt = clamp(t, 0, 1)\nq = a + t (b − a)    d = |p − q|',
+      used: ['Laser beams, tripwires and lightning arcs', 'Swords and bullets as swept segments',
+        'Snapping a cursor or a character to a path', 'Distance-based damage along a beam'],
+      tryThis: 'Watch the white dot slide along each laser as you move. Past the end of a laser it stops at the end (t is clamped). Untick "Clamp t": every laser becomes an infinite line and hits you from across the arena.',
+      controls: `<label><input type="checkbox" data-set="clampT"> Clamp t to 0–1 (segment, not line)</label>`,
+      draw() {
+        for (const l of lasers) {
+          if (!l.unlocked) continue;
+          if (!settings.clampT) { const [e0, e1] = infiniteEnds(l); line(e0, e1, 'rgba(255,107,107,.35)', 1, [4, 6]); }
+          const c = closestOnSeg(player.pos, l.a, l.b);
+          const hot = c.d < l.r + PLAYER_R;
+          line(player.pos, c.q, hot ? '#ff6b6b' : 'rgba(230,233,239,.6)', 1.5, [5, 5]);
+          circle(c.q, 4, '#ffffff');
+          const m = mul(add(player.pos, c.q), 0.5);
+          if (c.d < 420) text(`${f0(c.d)}  t=${f2(c.t)}`, m.x + 6, m.y - 4, hot ? '#ff6b6b' : '#e6e9ef', 12);
+        }
+      },
+      live() {
+        const n = nearestLaser();
+        if (!n) return 'no lasers on';
+        const { l, c } = n;
+        return `nearest: ${l.name}\n a = ${vs(l.a)}  b = ${vs(l.b)}\n p = ${vs(player.pos)}\n t (raw)    = ${f2(c.t)}\n t clamped  = ${settings.clampT ? f2(c.tc) : 'OFF (' + f2(c.t) + ')'}\n q = a + t(b − a) = ${vs(c.q)}\n d = |p − q| = ${f1(c.d)}\n hit if d < ${l.r} + ${PLAYER_R} = ${l.r + PLAYER_R}`;
+      },
+    },
+    {
+      name: 'Circles & capsules', chap: 'Chapter 21.6',
+      formula: 'circles touch:  d < r₁ + r₂\ncapsule = segment + radius\ncircle hits capsule: d(p, seg) < r + r_c',
+      used: ['Hitboxes for characters, bullets and pickups', 'Capsule colliders for characters',
+        'Pickup and trigger radii', 'Beams and swept attacks as capsules'],
+      tryThis: 'The outlines are the "fattened" lasers: each laser grown by your radius 12. You are hit exactly when your center enters one. The green ring is the pickup radius, 30.',
+      draw() {
+        ctx.lineWidth = 1.2;
+        for (const l of lasers) {
+          if (!l.unlocked) continue;
+          capsulePath(l.a, l.b, l.r + PLAYER_R);
+          ctx.strokeStyle = live(l) ? 'rgba(255,107,107,.8)' : 'rgba(255,107,107,.3)'; ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([]);
+        }
+        circle(player.pos, PICKUP, null, 'rgba(95,209,139,.7)', 1.2);
+        for (const m of mines) {
+          ctx.setLineDash([4, 4]); circle(m.pos, MINE_R + PLAYER_R, null, 'rgba(255,181,71,.6)', 1.2); ctx.setLineDash([]);
+        }
+        circle(player.pos, 2.5, '#ffffff');
+      },
+      live() {
+        const n = nearestLaser(), mo = nearestOf(mines), oo = nearestOf(orbs);
+        let s = '';
+        if (n) s += `nearest laser (${n.l.name})\n d = ${f1(n.c.d)}  vs r₁ + r₂ = ${n.l.r} + ${PLAYER_R} = ${n.l.r + PLAYER_R}\n`;
+        if (mo) { const d = Math.sqrt(mo.d2); s += `nearest mine\n d = ${f1(d)}  vs ${MINE_R} + ${PLAYER_R} = ${MINE_R + PLAYER_R}\n d² = ${f0(mo.d2)} vs ${(MINE_R + PLAYER_R) ** 2}\n`; }
+        if (oo) s += `nearest orb\n d = ${f1(Math.sqrt(oo.d2))}  collect if < ${PICKUP}`;
+        return s || 'nothing nearby';
+      },
+    },
+    {
+      name: 'Signed distance', chap: 'Chapter 21.5',
+      formula: 'line (2D plane):  n̂ · p = c\ns = n̂ · p − c\ns > 0 safe side · s < 0 hot side\ncircle safe if s ≥ r',
+      used: ['Kill planes, water levels and closing zones', 'Which side of a wall or portal am I on?',
+        'Keeping objects inside arena walls', 'Point-to-plane distance in 3D (floors, slopes)'],
+      tryThis: 'Before 15 orbs only the arena walls are shown. After that, the orange curtain sweeps in: s is your signed distance to its edge. Keep s above 12 (your radius).',
+      draw() {
+        const walls = [
+          { n: V(1, 0), c: 0 }, { n: V(-1, 0), c: -WORLD.w }, { n: V(0, 1), c: 0 }, { n: V(0, -1), c: -WORLD.h },
+        ];
+        for (const w of walls) {
+          const s = signedDist(player.pos, w.n, w.c);
+          const foot = sub(player.pos, mul(w.n, s));
+          line(player.pos, foot, 'rgba(154,163,178,.5)', 1, [3, 5]);
+          text(`s=${f0(s)}`, (player.pos.x + foot.x) / 2 + 4, (player.pos.y + foot.y) / 2 - 4, '#9aa3b2', 11);
+        }
+        if (curtain.on) {
+          const s = signedDist(player.pos, curtain.n, curtain.c);
+          const foot = sub(player.pos, mul(curtain.n, s));
+          line(player.pos, foot, s < PLAYER_R ? '#ff6b6b' : '#ffb547', 2);
+          arrow(foot, mul(curtain.n, 60), '#ffb547', 'n̂');
+          text(`s = n̂·p − c = ${f0(s)}`, player.pos.x + 16, player.pos.y + 30, s < PLAYER_R ? '#ff6b6b' : '#ffb547', 13);
+        }
+      },
+      live() {
+        const p = player.pos;
+        let s = `arena walls  (n̂, c) → s = n̂·p − c\n left   ((1, 0), 0)      ${f0(p.x)}\n right  ((−1, 0), −${WORLD.w}) ${f0(WORLD.w - p.x)}\n top    ((0, 1), 0)      ${f0(p.y)}\n bottom ((0, −1), −${WORLD.h}) ${f0(WORLD.h - p.y)}\n`;
+        if (curtain.on) {
+          const sv = signedDist(p, curtain.n, curtain.c);
+          s += `\ncurtain\n n̂ = ${vs(curtain.n, f2)}   c = ${f0(curtain.c)}\n n̂·p = ${f2(curtain.n.x)}×${f0(p.x)} + ${f2(curtain.n.y)}×${f0(p.y)} = ${f0(dot(curtain.n, p))}\n s = ${f0(dot(curtain.n, p))} − ${f0(curtain.c)} = ${f0(sv)}\n ${sv < PLAYER_R ? 'TOUCHING (s < 12)' : 'safe (s ≥ 12)'}`;
+        } else s += `\ncurtain arrives at 15 orbs`;
+        return s;
+      },
+    },
+    {
+      name: 'Closest point on a box', chap: 'Chapter 21.7',
+      formula: 'q = (clamp(px, x0, x1), clamp(py, y0, y1))\ntouching if |p − q| < r\ninside if q = p',
+      used: ['Circle vs tile and wall collisions', 'Pushing characters out of crates and pillars',
+        'Distance to a building for audio or AI', 'Clamping a camera inside level bounds'],
+      tryThis: 'Walk around a pillar. The white dot slides along a face, then sticks to a corner. Mines are pushed out of pillars the same way, so pillars make good shields.',
+      draw() {
+        for (const b of boxes) {
+          const q = closestOnBox(player.pos, b), d = dist(q, player.pos);
+          line(player.pos, q, 'rgba(230,233,239,.6)', 1.5, [5, 5]);
+          circle(q, 4, '#ffffff');
+          text(f0(d), q.x + 8, q.y - 6, '#e6e9ef', 12);
+          for (const m of mines) { const qm = closestOnBox(m.pos, b); if (dist(qm, m.pos) < 120) line(m.pos, qm, 'rgba(255,181,71,.5)', 1, [3, 4]); }
+        }
+      },
+      live() {
+        let best = null, bd = Infinity;
+        for (const b of boxes) { const d = dist(closestOnBox(player.pos, b), player.pos); if (d < bd) { bd = d; best = b; } }
+        const p = player.pos, q = closestOnBox(p, best);
+        return `nearest pillar\n x: ${best.x0}…${best.x1}   y: ${best.y0}…${best.y1}\n p = ${vs(p)}\n qx = clamp(${f0(p.x)}, ${best.x0}, ${best.x1}) = ${f0(q.x)}\n qy = clamp(${f0(p.y)}, ${best.y0}, ${best.y1}) = ${f0(q.y)}\n d = |p − q| = ${f1(bd)}\n ${bd < PLAYER_R + 0.5 ? 'touching: pushed out' : 'clear'}`;
+      },
+    },
+    {
+      name: 'Nearest & aim assist', chap: 'Chapter 21.8',
+      formula: 'nearest: smallest |m − p|²\naim ray: t = (m − p)·û,  t ≥ 0\nmiss = |(m − p) − t û|\nassist picks smallest miss ≤ 60',
+      used: ['Auto-targeting and lock-on', 'Gamepad aim assist and bullet magnetism',
+        '"Nearest enemy / item / cover" queries', 'Picking what the player is pointing at'],
+      tryThis: 'Aim roughly at a mine and zap: the beam bends to the mine with the smallest "miss" distance from your aim ray. Untick "Aim assist": you must now miss by less than 16.',
+      controls: `<label><input type="checkbox" data-set="assist"> Aim assist (miss ≤ 60)</label>`,
+      draw() {
+        const q = aimQuery();
+        line(player.pos, add(player.pos, mul(q.u, ZAP_RANGE)), 'rgba(108,184,255,.6)', 1.5, [6, 5]);
+        const w = settings.assist ? ASSIST : MINE_R + ZAP_R;
+        const nrm = V(-q.u.y, q.u.x);
+        for (const sgn of [1, -1]) line(add(player.pos, mul(nrm, w * sgn)), add(add(player.pos, mul(q.u, ZAP_RANGE)), mul(nrm, w * sgn)), 'rgba(108,184,255,.25)', 1);
+        for (const e of q.list) {
+          if (e.t < 0) { text('behind', e.m.pos.x, e.m.pos.y - 20, '#9aa3b2', 11, 'center'); continue; }
+          const foot = add(player.pos, mul(q.u, e.t));
+          line(foot, e.m.pos, e.ok ? '#6cb8ff' : 'rgba(154,163,178,.5)', 1.2);
+          text(`miss ${f0(e.perp)}`, e.m.pos.x + 16, e.m.pos.y - 8, e === q.pick ? '#6cb8ff' : '#9aa3b2', 12);
+        }
+        if (q.pick) circle(q.pick.m.pos, MINE_R + 7, null, '#6cb8ff', 2);
+        const no = nearestOf(orbs);
+        if (no) arrow(player.pos, mul(norm(sub(no.o.pos, player.pos)), 46), '#5fd18b', null, 2);
+      },
+      live() {
+        const q = aimQuery(), no = nearestOf(orbs), nm = nearestOf(mines);
+        let s = `aim û = ${vs(q.u, f2)}\n`;
+        if (no) s += `nearest orb   d = ${f0(Math.sqrt(no.d2))}  (d² = ${f0(no.d2)})\n`;
+        if (nm) s += `nearest mine  d = ${f0(Math.sqrt(nm.d2))}\n`;
+        s += `\nmine     t     miss\n`;
+        q.list.slice(0, 6).forEach((e, i) => { s += ` #${i + 1}  ${f0(e.t).padStart(5)}  ${e.t < 0 ? 'behind' : f0(e.perp).padStart(5)}${e === q.pick ? '  ← target' : ''}\n`; });
+        if (!q.list.length) s += ' (no mines)\n';
+        return s;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see the distances behind every hit.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+
+  // ---------- Loop ----------
+  reset();
+  renderCard();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two Racers</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls select, .controls input[type=range] { flex: 1; }
+  select { background: #11151c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px; }
+  .controls button { font: inherit; font-size: 12.5px; color: var(--text); background: #11151c;
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Two Racers</h1>
+    <p class="sub">You move so many meters per second. Your rival moves so many meters per frame. Change the frame rate and see who wins.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Jump</b> Space / W / ↑ · <b>Boost</b> Shift / B · <b>Freeze 1.5 s</b> H ·
+      <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Helpers ----------
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => n.toFixed(1);
+  const f2 = n => n.toFixed(2);
+  const f3 = n => n.toFixed(3);
+
+  // ---------- Race rules (every number here is quoted in Chapter 4) ----------
+  const LAP = 400, LAPS = 3, RACE = LAP * LAPS;       // meters
+  const RUN = 10, BOOST = 16, TRIP_SPEED = 3;         // meters per SECOND
+  const BOOST_TIME = 1.5, BOOST_COOLDOWN = 4;         // seconds
+  const JUMP_TIME = 0.5, TRIP_TIME = 1.0;             // seconds
+  const HURDLE_HALF = 1.0;                            // a hurdle blocks the lane within ±1 m
+  const RIVAL_STEP = 0.18, RIVAL_TURBO_STEP = 0.27;   // meters per FRAME
+  const RIVAL_CYCLE = 300, RIVAL_TURBO_FRAMES = 60;   // frames
+  const DT_MAX = 0.1, HICCUP = 1.5, COUNTDOWN = 3;    // seconds
+
+  const settings = {
+    fps: 0,          // 0 = native refresh rate
+    useDt: true,     // pitfall switch: off = one fixed 1/60 s step per frame
+    clampDt: true,   // pitfall switch: off = huge Δt after a freeze
+    timeScale: 1,    // slow motion
+    physHz: 0,       // 0 = variable step, otherwise a fixed step of 1/physHz s
+    interp: true,    // draw between the last two fixed steps
+  };
+
+  // ---------- Track geometry (world units; 6 units = 1 m) ----------
+  const WORLD = { w: 1200, h: 760 };
+  const PX = 6;
+  const R_IN = 36 * PX, R_OUT = R_IN + 34;            // lane center lines
+  const Lh = (LAP - 2 * Math.PI * 36) / 4 * PX;       // half a straight, so the inner lane is 400 m
+  const Cx = 600, Cy = 440;
+  const wrap = s => ((s % LAP) + LAP) % LAP;
+
+  // Point on a lane at distance s (segments measured on the inner lane, so equal s = side by side)
+  function lanePos(R, s) {
+    const arc = Math.PI * R_IN, L = 4 * Lh + 2 * arc;
+    let a = wrap(s) / LAP * L;
+    if (a < Lh) return { x: Cx + a, y: Cy + R, ang: 0 };
+    a -= Lh;
+    if (a < arc) { const ph = Math.PI / 2 - a / R_IN; return { x: Cx + Lh + R * Math.cos(ph), y: Cy + R * Math.sin(ph), ang: ph - Math.PI / 2 }; }
+    a -= arc;
+    if (a < 2 * Lh) return { x: Cx + Lh - a, y: Cy - R, ang: Math.PI };
+    a -= 2 * Lh;
+    if (a < arc) { const ph = -Math.PI / 2 - a / R_IN; return { x: Cx - Lh + R * Math.cos(ph), y: Cy + R * Math.sin(ph), ang: ph - Math.PI / 2 }; }
+    a -= arc;
+    return { x: Cx - Lh + a, y: Cy + R, ang: 0 };
+  }
+
+  // The same hurdles every race (seeded), so frame rates can be compared fairly
+  function makeHurdles() {
+    let seed = 7;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const list = [];
+    let s = 35;
+    while (s < RACE - 25) {
+      list.push({ s, state: 'up' });
+      if (rnd() < 0.22 && s + 10 < RACE - 25) { s += 10; list.push({ s, state: 'up' }); }
+      s += 24 + Math.round(rnd() * 18);
+    }
+    return list;
+  }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / WORLD.w, H / WORLD.h);
+    OX = (W - WORLD.w * S) / 2; OY = (H - WORLD.h * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- State ----------
+  let race, player, rival, hurdles, popups, prev, acc, alpha, stepsThisFrame, history, lastJump, best = null;
+  let started = false, paused = false;
+
+  function reset() {
+    race = { phase: started ? 'count' : 'ready', count: COUNTDOWN, time: 0, playerTime: null, rivalTime: null,
+      result: null, frames: 0 };
+    player = { s: 0, air: 0, boostT: 0, boostCd: 0, trip: 0, speed: RUN, jumps: 0, cleared: 0, hits: 0, tunneled: 0, frameStep: 0 };
+    rival = { s: 0, frames: 0, step: 0, turbo: false };
+    hurdles = makeHurdles();
+    popups = [];
+    prev = { s: 0, air: 0 };
+    acc = 0; alpha = 1; stepsThisFrame = 0;
+    history = [];
+    lastJump = null;
+  }
+  reset();
+
+  function popup(s, text, color, lane = R_IN) {
+    const p = lanePos(lane, s);
+    popups.push({ x: p.x, y: p.y - 26, text, color, life: 1.4 });
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) { started = true; race.phase = 'count'; return; }
+    if (e.repeat) return;
+    if (k === 'r') { reset(); return; }
+    if (k === 'p') paused = !paused;
+    if (k === 'h') hiccup();
+    if (k === ' ' || k === 'w' || k === 'arrowup') jump();
+    if (k === 'shift' || k === 'b') boost();
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => {
+    if (!started) { started = true; race.phase = 'count'; return; }
+    if (race.phase === 'done') reset(); else jump();
+  });
+
+  function jump() {
+    if (race.phase !== 'race' || paused) return;
+    if (player.air <= 0 && player.trip <= 0) { player.air = JUMP_TIME; player.jumps++; }
+  }
+  function boost() {
+    if (race.phase !== 'race' || paused) return;
+    if (player.boostCd <= 0 && player.trip <= 0) { player.boostT = BOOST_TIME; player.boostCd = BOOST_COOLDOWN; }
+  }
+  let hiccupUntil = 0;
+  function hiccup() { hiccupUntil = performance.now() + HICCUP * 1000; }
+
+  // ---------- Simulation ----------
+  const speedOf = p => p.trip > 0 ? TRIP_SPEED : p.boostT > 0 ? BOOST : RUN;
+
+  // One step of the player's world, h seconds long: p ← p + v·h, timers count down by h
+  function stepPlayer(h) {
+    const p = player, before = p.s, airAtStart = p.air;
+    p.speed = speedOf(p);
+    p.s += p.speed * h;
+    p.air = Math.max(0, p.air - h);
+    p.boostT = Math.max(0, p.boostT - h);
+    p.boostCd = Math.max(0, p.boostCd - h);
+    p.trip = Math.max(0, p.trip - h);
+    race.time += h;
+    checkHurdles(before, p.s, airAtStart);
+    if (before < RACE && p.s >= RACE && race.playerTime === null) {
+      race.playerTime = race.time - (p.s - RACE) / p.speed;     // back up by overshoot ÷ speed
+    }
+    stepsThisFrame++;
+  }
+
+  // Overlap test: a hurdle trips you if you stand within ±1 m of it on the ground
+  function checkHurdles(a, b, airAtStart) {
+    for (const hd of hurdles) {
+      if (hd.state !== 'up') continue;
+      if (hd.s - HURDLE_HALF > b) break;
+      if (Math.abs(b - hd.s) < HURDLE_HALF) {
+        if (player.air <= 0) {
+          hd.state = 'hit'; player.trip = TRIP_TIME; player.hits++;
+          popup(hd.s, 'tripped!', '#ff6b6b');
+        }
+      } else if (b >= hd.s + HURDLE_HALF) {
+        if (a <= hd.s - HURDLE_HALF && airAtStart <= 0) {
+          hd.state = 'tunneled'; player.tunneled++;
+          popup(hd.s, 'passed through it!', '#ff6b6b');
+        } else { hd.state = 'cleared'; player.cleared++; }
+      }
+    }
+  }
+
+  // The rival: a fixed distance every frame, and a turbo counted in frames. No Δt anywhere.
+  function stepRival() {
+    rival.frames++;
+    rival.turbo = rival.frames % RIVAL_CYCLE >= RIVAL_CYCLE - RIVAL_TURBO_FRAMES;
+    rival.step = rival.turbo ? RIVAL_TURBO_STEP : RIVAL_STEP;
+    const before = rival.s;
+    rival.s += rival.step;
+    if (before < RACE && rival.s >= RACE && race.rivalTime === null) {
+      race.rivalTime = race.time; race.rivalFrame = race.frames;
+      race.rivalFrac = (rival.s - RACE) / rival.step;
+      if (race.playerTime === null) popup(RACE, 'rival finished!', '#ffb547', R_OUT);
+    }
+  }
+
+  function update(dt, rawDt, nowSec) {
+    for (const p of popups) { p.life -= Math.min(rawDt, 0.1); p.y -= 22 * Math.min(rawDt, 0.1); }
+    popups = popups.filter(p => p.life > 0);
+    if (race.phase === 'done' || race.phase === 'ready') return;
+    const gameDt = settings.useDt ? dt * settings.timeScale : 1 / 60;
+    if (race.phase === 'count') {
+      race.count -= gameDt;
+      if (race.count <= 0) race.phase = 'race';
+      return;
+    }
+    race.frames++;
+    stepsThisFrame = 0;
+    const sBefore = player.s, hurdleStates = player.tunneled;
+    if (!settings.useDt || settings.physHz === 0) {
+      prev = { s: player.s, air: player.air };
+      stepPlayer(gameDt);
+      acc = 0; alpha = 1;
+    } else {
+      const h = 1 / settings.physHz;
+      acc += gameDt;                               // bank the frame's time…
+      while (acc >= h) {                           // …and spend it in fixed steps
+        prev = { s: player.s, air: player.air };
+        stepPlayer(h);
+        acc -= h;
+      }
+      alpha = acc / h;                             // leftover fraction of a step
+    }
+    player.frameStep = player.s - sBefore;
+    if (rawDt > 0.25) lastJump = { from: sBefore, to: player.s, raw: rawDt, used: dt, tunneled: player.tunneled - hurdleStates, life: 6 };
+    if (lastJump) lastJump.life -= Math.min(rawDt, 0.1);
+    stepRival();
+
+    history.push({ t: nowSec, p: player.s, r: rival.s });
+    while (history.length > 2 && nowSec - history[1].t >= 1) history.shift();
+
+    // Finish
+    if (race.playerTime !== null) {
+      let won = race.rivalTime === null;
+      if (race.rivalTime !== null && race.rivalFrame === race.frames) {
+        won = (player.s - RACE) / Math.max(player.frameStep, 1e-9) > race.rivalFrac;   // same frame: who overshot more?
+      }
+      const rr = rates().r;
+      race.result = {
+        won, time: race.playerTime, rivalLeft: Math.max(0, RACE - rival.s),
+        rivalTime: race.rivalTime !== null ? race.rivalTime : race.playerTime + Math.max(0, RACE - rival.s) / Math.max(rr, 1e-6),
+        fps: fpsShown, hits: player.hits,
+      };
+      if (won && (best === null || race.playerTime < best)) best = race.playerTime;
+      race.phase = 'done';
+    }
+  }
+
+  // Average rate over (about) the last second of real time: change ÷ time
+  function rates() {
+    if (history.length < 2) return { p: 0, r: 0, span: 0 };
+    const a = history[0], b = history[history.length - 1], span = b.t - a.t;
+    if (span <= 0) return { p: 0, r: 0, span: 0 };
+    return { p: (b.p - a.p) / span, r: (b.r - a.r) / span, span };
+  }
+
+  // ---------- Drawing ----------
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(x, y, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function trackPath(R) {
+    ctx.beginPath();
+    ctx.moveTo(Cx - Lh, Cy + R); ctx.lineTo(Cx + Lh, Cy + R);
+    ctx.arc(Cx + Lh, Cy, R, Math.PI / 2, -Math.PI / 2, true);
+    ctx.lineTo(Cx - Lh, Cy - R);
+    ctx.arc(Cx - Lh, Cy, R, -Math.PI / 2, Math.PI / 2, true);
+    ctx.closePath();
+  }
+  function lanePath(R, s0, s1) {           // a stretch of lane, drawn as a polyline
+    ctx.beginPath();
+    const n = Math.max(2, Math.ceil(Math.abs(s1 - s0) / 1.5));
+    for (let i = 0; i <= n; i++) {
+      const p = lanePos(R, lerp(s0, s1, i / n));
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+  }
+
+  function drawRacer(R, s, air, color, label, opts = {}) {
+    const g = lanePos(R, s);
+    const u = air > 0 ? 1 - air / JUMP_TIME : 0;
+    const hgt = air > 0 ? 4 * u * (1 - u) : 0;
+    if (opts.boost) {
+      ctx.strokeStyle = 'rgba(108,184,255,.5)'; ctx.lineWidth = 3;
+      lanePath(R, s - 6, s); ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(0,0,0,.45)';
+    ctx.beginPath(); ctx.ellipse(g.x, g.y + 3, 11, 6, 0, 0, Math.PI * 2); ctx.fill();
+    const y = g.y - hgt * 26, r = 11 * (1 + 0.25 * hgt);
+    circle(g.x, y, r, color, opts.trip ? '#ff6b6b' : '#0b0d12', opts.trip ? 3 : 2);
+    ctx.strokeStyle = '#0b0d12'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(g.x, y); ctx.lineTo(g.x + Math.cos(g.ang) * r, y + Math.sin(g.ang) * r); ctx.stroke();
+    text(label, g.x, y - r - 6, color, 12, 'center');
+    return { x: g.x, y };
+  }
+
+  let fpsShown = 60, avgDt = 1 / 60, lastRawDt = 1 / 60, lastUsedDt = 1 / 60, frameTimes = [];
+
+  function playerDrawState() {
+    const fixed = settings.useDt && settings.physHz > 0;
+    if (fixed && settings.interp) return { s: lerp(prev.s, player.s, alpha), air: lerp(prev.air, player.air, alpha) };
+    return { s: player.s, air: player.air };
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+
+    // Infield and track
+    trackPath((R_IN + R_OUT) / 2); ctx.strokeStyle = '#3a2a2a'; ctx.lineWidth = 72; ctx.stroke();
+    trackPath(R_IN - 18); ctx.fillStyle = '#16251c'; ctx.fill();
+    ctx.strokeStyle = 'rgba(230,233,239,.35)'; ctx.lineWidth = 1.5;
+    for (const R of [R_IN - 17, (R_IN + R_OUT) / 2, R_OUT + 17]) { trackPath(R); ctx.stroke(); }
+    // Start / finish line
+    ctx.strokeStyle = '#e6e9ef'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(Cx, Cy + R_IN - 17); ctx.lineTo(Cx, Cy + R_OUT + 17); ctx.stroke();
+    text('START / FINISH', Cx, Cy + R_OUT + 36, '#9aa3b2', 11, 'center');
+    // Meter marks every 100 m on the inner edge
+    for (let m = 100; m < LAP; m += 100) {
+      const p = lanePos(R_IN - 30, m);
+      text(`${m} m`, p.x, p.y + 4, '#4a5162', 11, 'center');
+    }
+
+    // Hurdles: the ones within the next lap ahead of you
+    const ds = playerDrawState();
+    for (const hd of hurdles) {
+      if (hd.s < ds.s - 40 || hd.s > ds.s + LAP - 20) continue;
+      const p = lanePos(R_IN, hd.s);
+      const nx = -Math.sin(p.ang), ny = Math.cos(p.ang);
+      const col = hd.state === 'up' ? '#e6e9ef' : hd.state === 'hit' ? '#6b7385' : hd.state === 'tunneled' ? '#ff6b6b' : '#3d4556';
+      ctx.strokeStyle = col; ctx.lineWidth = hd.state === 'hit' ? 3 : 4;
+      ctx.beginPath(); ctx.moveTo(p.x - nx * 14, p.y - ny * 14); ctx.lineTo(p.x + nx * 14, p.y + ny * 14); ctx.stroke();
+      if (hd.state === 'up' && hd.s - ds.s < LAP / 2) {
+        ctx.fillStyle = '#ffb547';
+        ctx.fillRect(p.x - 2.5, p.y - 2.5, 5, 5);
+      }
+    }
+
+    // Racers
+    const rp = drawRacer(R_OUT, rival.s, 0, '#ffb547', 'RIVAL', {});
+    const pp = drawRacer(R_IN, ds.s, ds.air, '#6cb8ff', 'YOU', { boost: player.boostT > 0, trip: player.trip > 0 });
+
+    for (const l of LENSES) if (l.on) l.draw(pp, rp, ds);
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.x, p.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    drawHud();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!started) overlay('TWO RACERS', ['Beat the rival over 3 laps (1200 m)', 'Space / W / ↑ to jump hurdles · Shift or B to boost',
+      `Your rival moves 0.18 m every frame. Your screen: about ${f0(fpsShown)} fps.`, 'Press any key to start']);
+    else if (race.phase === 'done') {
+      const r = race.result;
+      overlay(r.won ? 'YOU WIN' : 'RIVAL WINS', [
+        `your time ${f2(r.time)} s · rival ${r.won ? '≈ ' : ''}${f2(r.rivalTime)} s${r.won ? ` (${f1(r.rivalLeft)} m behind)` : ''}`,
+        `frame rate ≈ ${f0(r.fps)} fps · Δt ${settings.useDt ? 'on' : 'OFF'} · ${r.hits} hurdles hit${best !== null ? ` · best win ${f2(best)} s` : ''}`,
+        'Press R or click to race again']);
+    }
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function bar(y, label, s, color) {
+    const x = 150, w = 900;
+    text(label, x - 14, y + 10, color, 13, 'right');
+    ctx.fillStyle = '#1f2430'; ctx.fillRect(x, y, w, 12);
+    ctx.fillStyle = color; ctx.fillRect(x, y, w * clamp(s / RACE, 0, 1), 12);
+    ctx.fillStyle = '#0b0d12';
+    for (let k = 1; k < LAPS; k++) ctx.fillRect(x + w * k / LAPS - 1, y, 2, 12);
+    text(`${f1(Math.min(s, RACE))} m`, x + w + 10, y + 10, '#9aa3b2', 12);
+  }
+
+  function drawHud() {
+    bar(28, 'YOU', player.s, '#6cb8ff');
+    bar(52, 'RIVAL', rival.s, '#ffb547');
+    const lap = Math.min(LAPS, Math.floor(player.s / LAP) + 1);
+    text(`time ${f1(race.time)} s   lap ${lap}/${LAPS}   ${f0(fpsShown)} fps = ${f1(1000 / fpsShown)} ms per frame${settings.useDt ? '' : '   Δt OFF'}${settings.clampDt ? '' : '   clamp OFF'}${settings.timeScale !== 1 ? `   time ×${settings.timeScale}` : ''}`,
+      150, 96, '#9aa3b2', 13);
+
+    // Infield panel
+    text('YOU     10 m per second × Δt', Cx, Cy - 70, '#6cb8ff', 14, 'center');
+    text('RIVAL   0.18 m per frame', Cx, Cy - 46, '#ffb547', 14, 'center');
+    if (race.phase === 'count') text(`${Math.ceil(race.count)}`, Cx, Cy + 20, '#e6e9ef', 54, 'center');
+    else if (race.phase === 'race' || race.phase === 'done') {
+      const bx = Cx - 120, by = Cy + 4;
+      text(player.boostT > 0 ? `BOOST ${f1(player.boostT)} s` : player.boostCd > 0 ? `boost ready in ${f1(player.boostCd)} s` : 'BOOST READY (Shift)',
+        Cx, by, player.boostT > 0 ? '#6cb8ff' : player.boostCd > 0 ? '#9aa3b2' : '#5fd18b', 14, 'center');
+      ctx.fillStyle = '#1f2430'; ctx.fillRect(bx, by + 10, 240, 6);
+      ctx.fillStyle = player.boostCd > 0 ? '#4a5162' : '#5fd18b';
+      ctx.fillRect(bx, by + 10, 240 * (1 - player.boostCd / BOOST_COOLDOWN), 6);
+      text(`hurdles cleared ${player.cleared} · hit ${player.hits}`, Cx, by + 44, '#9aa3b2', 12, 'center');
+      if (race.rivalTime !== null && race.phase === 'race') text('RIVAL HAS FINISHED', Cx, by + 70, '#ffb547', 14, 'center');
+    }
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 30, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'Delta time', chap: 'Chapter 4.3–4.4',
+      formula: 'you:    s ← s + v × Δt     (v = 10 m/s)\nrival:  s ← s + 0.18      (every frame)\nΔt = seconds since the last frame',
+      used: ['The same speed on 30, 60, 120 and 144 Hz screens', 'Every moving object, projectile and particle',
+        'Animation playback speed', 'Physics, cameras and scrolling backgrounds'],
+      tryThis: 'Set the frame rate to 30: the rival crawls at half speed. Then switch off "Use Δt" at 15 fps: you crawl too, and the whole race runs at a quarter speed.',
+      controls: `<label>Frame rate <select data-set="fps"><option value="0">native</option><option value="60">60 fps</option><option value="30">30 fps</option><option value="15">15 fps</option></select></label>
+        <label><input type="checkbox" data-set="useDt"> Use Δt (frame-rate independent)</label>`,
+      draw(pp, rp) {
+        text(`+${f3(player.frameStep)} m this frame`, pp.x, pp.y + 30, '#6cb8ff', 12, 'center');
+        text(`+${f3(rival.step || RIVAL_STEP)} m this frame`, rp.x, rp.y + 30, '#ffb547', 12, 'center');
+        // A strip with one tick per frame drawn during the last second
+        const x0 = 200, x1 = 1000, y = 736, now = performance.now();
+        ctx.fillStyle = '#1f2430'; ctx.fillRect(x0, y - 12, x1 - x0, 18);
+        ctx.strokeStyle = '#ffb547'; ctx.lineWidth = 1.5; ctx.beginPath();
+        for (const t of frameTimes) { const x = x1 - (now - t) / 1000 * (x1 - x0); ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 4); }
+        ctx.stroke();
+        text(`last second: ${frameTimes.length} frames`, x0 - 10, y + 2, '#9aa3b2', 12, 'right');
+        text('now', x1 + 8, y + 2, '#9aa3b2', 12);
+      },
+      live() {
+        const used = settings.useDt ? lastUsedDt * settings.timeScale : 1 / 60;
+        const rs = rival.step || RIVAL_STEP;
+        return `frame rate   ${f0(fpsShown)} fps\n           = ${f1(1000 / fpsShown)} ms per frame\nreal Δt      ${f1(lastRawDt * 1000)} ms\nstep used    ${f1(used * 1000)} ms${settings.useDt ? '' : '  (fixed 1/60: Δt OFF!)'}\n\nYOU   v × Δt = ${f1(speedOf(player))} × ${f3(used)}\n           = ${f3(speedOf(player) * used)} m per frame\n      × ${f0(fpsShown)} fps = ${f1(speedOf(player) * used * fpsShown)} m/s\nRIVAL ${f3(rs)} m per frame\n      × ${f0(fpsShown)} fps = ${f1(rs * fpsShown)} m/s`;
+      },
+    },
+    {
+      name: 'Rates', chap: 'Chapter 4.1–4.2',
+      formula: 'average rate = change ÷ time\n             = Δs ÷ Δt   (m/s)\ntime left    = distance left ÷ rate',
+      used: ['Speedometers and "km/h" readouts', 'Damage per second (DPS) and fire rates',
+        'Income per minute in strategy and idle games', 'Predicting arrival times for AI and HUDs'],
+      tryThis: 'Watch the hollow rings: each one shows where that racer will be one second from now at its current rate. Change the frame rate and the rival\'s ring jumps.',
+      draw(pp, rp, ds) {
+        const r = rates();
+        const pg = lanePos(R_IN, ds.s + r.p), rg = lanePos(R_OUT, rival.s + r.r);
+        ctx.setLineDash([4, 4]);
+        circle(pg.x, pg.y, 11, null, '#6cb8ff', 2); circle(rg.x, rg.y, 11, null, '#ffb547', 2);
+        ctx.setLineDash([]);
+        text('in 1 s', pg.x, pg.y + 26, '#6cb8ff', 11, 'center');
+        text('in 1 s', rg.x, rg.y - 18, '#ffb547', 11, 'center');
+        text(`${f1(r.p)} m/s`, pp.x, pp.y + 44, '#6cb8ff', 12, 'center');
+        text(`${f1(r.r)} m/s`, rp.x, rp.y + 44, '#ffb547', 12, 'center');
+      },
+      live() {
+        const r = rates(), t = Math.max(race.time, 1e-6);
+        const pl = Math.max(0, RACE - player.s), rl = Math.max(0, RACE - rival.s);
+        return `over the last ${f2(r.span)} s of real time\nYOU    Δs ÷ Δt = ${f1(r.p)} m/s\nRIVAL  Δs ÷ Δt = ${f1(r.r)} m/s\n\nwhole race so far (${f1(race.time)} s)\nYOU    ${f1(player.s)} ÷ ${f1(t)} = ${f2(player.s / t)} m/s\nRIVAL  ${f1(rival.s)} ÷ ${f1(t)} = ${f2(rival.s / t)} m/s\n\nat these rates, time to finish\nYOU    ${f1(pl)} ÷ ${f1(r.p)} = ${r.p > 0 ? f1(pl / r.p) : '–'} s\nRIVAL  ${f1(rl)} ÷ ${f1(r.r)} = ${r.r > 0 ? f1(rl / r.r) : '–'} s`;
+      },
+    },
+    {
+      name: 'Timers & slow-mo', chap: 'Chapter 4.5–4.6',
+      formula: 'cooldown ← cooldown − Δt\nready when cooldown ≤ 0\nslow motion: Δt ← Δt × scale',
+      used: ['Ability cooldowns and reload times', 'Spawn timers, fuses and countdowns',
+        'Invincibility frames after a hit', 'Bullet time and hit-stop (scaling Δt)'],
+      tryThis: 'Drag the time scale to 0.25. Your racer, your jumps and your boost timer all slow down, but the rival does not: it ignores Δt, so it ignores slow motion too.',
+      controls: `<label>Time scale <input type="range" min="0.25" max="1" step="0.05" data-set="timeScale"> <span data-show="timeScale"></span>×</label>`,
+      draw(pp, rp) {
+        // Cooldown ring around the player
+        const frac = player.boostCd / BOOST_COOLDOWN;
+        ctx.strokeStyle = '#1f2430'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(pp.x, pp.y, 20, 0, Math.PI * 2); ctx.stroke();
+        if (frac > 0) {
+          ctx.strokeStyle = '#9aa3b2';
+          ctx.beginPath(); ctx.arc(pp.x, pp.y, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke();
+        }
+        text(player.boostCd > 0 ? `cooldown ${f2(player.boostCd)} s` : 'boost ready', pp.x, pp.y + 34, '#9aa3b2', 12, 'center');
+        if (player.air > 0) text(`air ${f2(player.air)} s`, pp.x + 28, pp.y - 10, '#6cb8ff', 12);
+        const left = RIVAL_CYCLE - RIVAL_TURBO_FRAMES - (rival.frames % RIVAL_CYCLE);
+        text(rival.turbo ? `TURBO ${RIVAL_CYCLE - rival.frames % RIVAL_CYCLE} frames` : `turbo in ${left} frames`, rp.x, rp.y + 34, '#ffb547', 12, 'center');
+      },
+      live() {
+        const left = rival.turbo ? 0 : RIVAL_CYCLE - RIVAL_TURBO_FRAMES - (rival.frames % RIVAL_CYCLE);
+        return `time scale        ×${settings.timeScale}\nboost             ${f2(player.boostT)} s left\nboost cooldown    ${f2(player.boostCd)} s left\njump (in the air) ${f2(player.air)} s left\ntrip              ${f2(player.trip)} s left\n\nrival turbo in    ${left} frames\n  at ${f0(fpsShown)} fps   = ${f1(left / fpsShown)} s\n  at 60 fps    = ${f1(left / 60)} s\n  at 15 fps    = ${f1(left / 15)} s`;
+      },
+    },
+    {
+      name: 'Fixed timestep', chap: 'Chapter 4.7',
+      formula: 'acc ← acc + Δt\nwhile acc ≥ h:  step(h);  acc ← acc − h\nα = acc ÷ h\ndraw at lerp(previous, current, α)',
+      used: ['Physics engines (stable, repeatable results)', 'Networked and lockstep multiplayer',
+        'Replays and "ghost" racers', 'Rhythm games and deterministic puzzles'],
+      tryThis: 'Choose "fixed 10 Hz" and untick Interpolate: your racer hops 1 m at a time while the rival glides. Tick it again: smooth, with the same physics underneath.',
+      controls: `<label>Physics step <select data-set="physHz"><option value="0">variable (Δt)</option><option value="60">fixed 1/60 s</option><option value="10">fixed 1/10 s</option></select></label>
+        <label><input type="checkbox" data-set="interp"> Interpolate (draw between steps)</label>`,
+      draw(pp) {
+        const fixed = settings.useDt && settings.physHz > 0;
+        if (!fixed) { text('variable step: one step of Δt per frame', pp.x, pp.y + 30, '#9aa3b2', 12, 'center'); return; }
+        const a = lanePos(R_IN, prev.s), b = lanePos(R_IN, player.s);
+        circle(a.x, a.y, 11, null, '#b48cff', 1.5);
+        circle(b.x, b.y, 11, null, '#5fd18b', 1.5);
+        text('prev', a.x, a.y + 26, '#b48cff', 11, 'center');
+        text('current', b.x, b.y - 18, '#5fd18b', 11, 'center');
+        // Accumulator gauge
+        const x = Cx - 120, y = Cy + 100;
+        ctx.fillStyle = '#1f2430'; ctx.fillRect(x, y, 240, 10);
+        ctx.fillStyle = '#b48cff'; ctx.fillRect(x, y, 240 * clamp(alpha, 0, 1), 10);
+        text(`accumulator α = ${f2(alpha)} of a step · ${stepsThisFrame} step(s) this frame`, Cx, y + 28, '#b48cff', 12, 'center');
+      },
+      live() {
+        const fixed = settings.useDt && settings.physHz > 0;
+        if (!fixed) return `variable step\none step per frame, h = Δt = ${f1(lastUsedDt * settings.timeScale * 1000)} ms\n(choose a fixed step to see the accumulator)`;
+        const h = 1 / settings.physHz;
+        return `fixed step h       ${f1(h * 1000)} ms\nframe Δt           ${f1(lastUsedDt * settings.timeScale * 1000)} ms\nsteps this frame   ${stepsThisFrame}\nleftover acc       ${f1(acc * 1000)} ms\nα = acc ÷ h        ${f2(alpha)}\nprevious s         ${f2(prev.s)} m\ncurrent s          ${f2(player.s)} m\ndrawn at           ${f2(playerDrawState().s)} m${settings.interp ? '' : '  (no interpolation)'}`;
+      },
+    },
+    {
+      name: 'Clamp Δt', chap: 'Chapter 4.8',
+      formula: 'Δt ← min(Δt, 0.1)\nlargest step = v × 0.1 = 1.6 m at 16 m/s\nhurdle zone = 2 m wide',
+      used: ['Coming back from another tab or a paused laptop', 'Loading hitches and garbage-collection pauses',
+        'Stopping objects from tunneling through walls', 'Keeping physics from exploding after a stall'],
+      tryThis: 'Untick "Clamp Δt" and press H just before a hurdle. The game freezes for 1.5 s, then your racer jumps 15 m in one frame and passes straight through the hurdle.',
+      controls: `<label><input type="checkbox" data-set="clampDt"> Clamp Δt to 0.1 s</label>
+        <button data-act="hiccup">Freeze the game for 1.5 s (H)</button>`,
+      draw(pp) {
+        text(`raw Δt ${f1(lastRawDt * 1000)} ms → used ${f1(lastUsedDt * 1000)} ms`, pp.x, pp.y + 30, '#9aa3b2', 12, 'center');
+        if (!lastJump || lastJump.life <= 0) return;
+        ctx.globalAlpha = clamp(lastJump.life / 2, 0, 1);
+        ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 3; ctx.setLineDash([6, 5]);
+        lanePath(R_IN - 22, lastJump.from, lastJump.to); ctx.stroke(); ctx.setLineDash([]);
+        const m = lanePos(R_IN - 40, (lastJump.from + lastJump.to) / 2);
+        text(`${f1(lastJump.to - lastJump.from)} m in ONE frame`, m.x, m.y, '#ff6b6b', 13, 'center');
+        text(`Δt = ${f2(lastJump.used)} s${lastJump.tunneled ? ` · ${lastJump.tunneled} hurdle(s) skipped` : ''}`, m.x, m.y + 16, '#ff6b6b', 12, 'center');
+        ctx.globalAlpha = 1;
+      },
+      live() {
+        let s = `clamp          ${settings.clampDt ? 'on (max 0.1 s)' : 'OFF'}\nraw Δt         ${f1(lastRawDt * 1000)} ms\nused Δt        ${f1(lastUsedDt * 1000)} ms\nhurdles passed through: ${player.tunneled}`;
+        if (lastJump) s += `\n\nlast freeze\n raw Δt  ${f2(lastJump.raw)} s → used ${f2(lastJump.used)} s\n moved   ${f2(lastJump.to - lastJump.from)} m in one frame\n skipped ${lastJump.tunneled} hurdle(s)`;
+        return s;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => { toggleLens(l); b.blur(); });
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Race once first. Then press 1–5 to see how each racer measures time.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+        if (key === 'fps') nextDue = 0;
+        if (key === 'physHz') acc = 0;
+      });
+      el.addEventListener('change', () => el.blur());
+    });
+    cardEl.querySelectorAll('[data-act="hiccup"]').forEach(el => el.addEventListener('click', () => { hiccup(); el.blur(); }));
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), nextDue = 0, liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (now < hiccupUntil) return;                  // frozen: no frames at all, like a hidden tab
+    if (settings.fps > 0) {                          // simulate a slower display
+      const interval = 1000 / settings.fps;
+      if (now < nextDue - interval * 0.25) return;
+      nextDue += interval;
+      if (nextDue < now) nextDue = now + interval;
+    }
+    const rawDt = (now - last) / 1000;
+    last = now;
+    const dt = settings.clampDt ? Math.min(rawDt, DT_MAX) : rawDt;   // clamp big gaps
+    lastRawDt = rawDt; lastUsedDt = dt;
+    if (rawDt < 0.25) { avgDt += (rawDt - avgDt) * 0.1; fpsShown = 1 / Math.max(avgDt, 1e-4); }
+    frameTimes.push(now);
+    while (frameTimes.length && now - frameTimes[0] > 1000) frameTimes.shift();
+    if (started && !paused) update(dt, rawDt, now / 1000);
+    render();
+    liveTimer -= Math.min(rawDt, 0.1);
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

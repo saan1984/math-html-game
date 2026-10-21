@@ -1,0 +1,976 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swarm</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Swarm</h1>
+    <p class="sub">Survive three minutes against a swarm that grows into the thousands. A spatial grid keeps the collision checks fast.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Move</b> WASD / arrows · <b>Aim</b> mouse (fires automatically) · <b>Nova</b> Space ·
+      <b>Auto-aim</b> T · <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Small helpers ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const fmt = n => Math.round(n).toLocaleString('en-US');
+  const pairs = k => k * (k - 1) / 2;                       // n(n − 1)/2
+
+  const settings = {
+    useGrid: true,     // the pitfall switch: off = brute force, every pair
+    cellSize: 24,      // world units per grid cell
+    quadtree: false,   // use a quadtree instead of the uniform grid
+    cull: true,        // skip drawing units outside the camera view
+    zoomOut: false,    // show the whole world (culling lens)
+  };
+
+  const WORLD = { w: 2400, h: 1600 };
+  const VIEW = { w: 1200, h: 800 };
+  const MAX_UNITS = 4000;
+  const UNIT_R = 6, PLAYER_R = 12, BULLET_R = 3;
+  const UNIT_REACH = UNIT_R + UNIT_R;       // 12: two units touch when d < 12
+  const BULLET_REACH = BULLET_R + UNIT_R;   // 9
+  const PLAYER_REACH = PLAYER_R + UNIT_R;   // 18
+  const PLAYER_SPEED = 240;
+  const BULLET_SPEED = 650, BULLET_LIFE = 0.9, FIRE_RATE = 10, SPREAD = 0.08;
+  const NOVA_R = 220, NOVA_COOLDOWN = 10, SHOCK_R = 90;
+  const GAME_TIME = 180, HEARTS = 5;
+  const KILLS_PER_LEVEL = 150, MAX_LEVEL = 4;
+  const AGGRO = 400, DRIFT = 0.6;     // chase inside 400, otherwise drift at 60% speed
+  const SPAWN_BASE = 8, SPAWN_GROWTH = 0.4, SPAWN_DIST = 780;   // units per second = 8 + 0.4t
+  const QT_CAP = 8, QT_DEPTH = 8;
+
+  // ---------- Units, stored as flat arrays ----------
+  const ux = new Float64Array(MAX_UNITS), uy = new Float64Array(MAX_UNITS), us = new Float64Array(MAX_UNITS);
+  const dead = new Uint8Array(MAX_UNITS);
+  const cand = new Int32Array(MAX_UNITS);   // candidate list filled by every broad-phase query
+  let n = 0;
+
+  // ---------- Uniform grid: cell = (floor(x / s), floor(y / s)) ----------
+  const grid = { s: 0, cols: 0, rows: 0, start: null, cursor: null,
+    items: new Int32Array(MAX_UNITS), cell: new Int32Array(MAX_UNITS), built: false };
+  function buildGrid() {
+    const s = settings.cellSize;
+    if (grid.s !== s) {
+      grid.s = s; grid.cols = Math.ceil(WORLD.w / s); grid.rows = Math.ceil(WORLD.h / s);
+      grid.start = new Int32Array(grid.cols * grid.rows + 1);
+      grid.cursor = new Int32Array(grid.cols * grid.rows + 1);
+    }
+    const { cols, rows, start, cursor, items, cell } = grid;
+    start.fill(0);
+    for (let i = 0; i < n; i++) {
+      const cx = Math.min(cols - 1, Math.max(0, Math.floor(ux[i] / s)));
+      const cy = Math.min(rows - 1, Math.max(0, Math.floor(uy[i] / s)));
+      const c = cy * cols + cx;
+      cell[i] = c; start[c + 1]++;
+    }
+    const nc = cols * rows;
+    for (let c = 0; c < nc; c++) start[c + 1] += start[c];
+    cursor.set(start);
+    for (let i = 0; i < n; i++) items[cursor[cell[i]]++] = i;
+    grid.built = true;
+  }
+  function gridRange(x, y, R) {
+    const s = grid.s;
+    return {
+      i0: Math.max(0, Math.floor((x - R) / s)), i1: Math.min(grid.cols - 1, Math.floor((x + R) / s)),
+      j0: Math.max(0, Math.floor((y - R) / s)), j1: Math.min(grid.rows - 1, Math.floor((y + R) / s)),
+    };
+  }
+  // Every unit in the cells that the box [x − R, x + R] × [y − R, y + R] touches
+  function gridGather(x, y, R) {
+    const s = grid.s, cols = grid.cols, start = grid.start, items = grid.items;
+    const i0 = Math.max(0, Math.floor((x - R) / s)), i1 = Math.min(cols - 1, Math.floor((x + R) / s));
+    const j0 = Math.max(0, Math.floor((y - R) / s)), j1 = Math.min(grid.rows - 1, Math.floor((y + R) / s));
+    let m = 0;
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const c = j * cols + i;
+        stats.cells++;
+        for (let k = start[c], e = start[c + 1]; k < e; k++) cand[m++] = items[k];
+      }
+    }
+    return m;
+  }
+
+  // ---------- Quadtree: split a node into four when it holds more than 8 units ----------
+  const QMAX = 4 * MAX_UNITS + 8;
+  const qt = { x0: new Float64Array(QMAX), y0: new Float64Array(QMAX), x1: new Float64Array(QMAX), y1: new Float64Array(QMAX),
+    child: new Int32Array(QMAX), start: new Int32Array(QMAX), count: new Int32Array(QMAX), depth: new Uint8Array(QMAX),
+    items: new Int32Array(MAX_UNITS), nodes: 0, leaves: 0, maxDepth: 0, built: false };
+  const qstack = new Int32Array(256);
+  function partX(lo, hi, m) {
+    const it = qt.items; let i = lo;
+    for (let k = lo; k < hi; k++) if (ux[it[k]] < m) { const t = it[i]; it[i] = it[k]; it[k] = t; i++; }
+    return i;
+  }
+  function partY(lo, hi, m) {
+    const it = qt.items; let i = lo;
+    for (let k = lo; k < hi; k++) if (uy[it[k]] < m) { const t = it[i]; it[i] = it[k]; it[k] = t; i++; }
+    return i;
+  }
+  function qtBuild(node, x0, y0, x1, y1, lo, hi, depth) {
+    qt.x0[node] = x0; qt.y0[node] = y0; qt.x1[node] = x1; qt.y1[node] = y1; qt.depth[node] = depth;
+    qt.start[node] = lo; qt.count[node] = hi - lo;
+    if (depth > qt.maxDepth) qt.maxDepth = depth;
+    if (hi - lo <= QT_CAP || depth >= QT_DEPTH) { qt.child[node] = -1; qt.leaves++; return; }
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    const midY = partY(lo, hi, my);          // north half | south half
+    const a = partX(lo, midY, mx);           // NW | NE
+    const b = partX(midY, hi, mx);           // SW | SE
+    const c = qt.nodes; qt.nodes += 4; qt.child[node] = c;
+    qtBuild(c, x0, y0, mx, my, lo, a, depth + 1);
+    qtBuild(c + 1, mx, y0, x1, my, a, midY, depth + 1);
+    qtBuild(c + 2, x0, my, mx, y1, midY, b, depth + 1);
+    qtBuild(c + 3, mx, my, x1, y1, b, hi, depth + 1);
+  }
+  function buildQuadtree() {
+    for (let i = 0; i < n; i++) qt.items[i] = i;
+    qt.nodes = 1; qt.leaves = 0; qt.maxDepth = 0;
+    qtBuild(0, 0, 0, WORLD.w, WORLD.h, 0, n, 0);
+    qt.built = true;
+  }
+  function qtGather(x, y, R) {
+    const ax0 = x - R, ay0 = y - R, ax1 = x + R, ay1 = y + R;
+    let sp = 0, m = 0;
+    qstack[sp++] = 0;
+    while (sp > 0) {
+      const nd = qstack[--sp];
+      stats.cells++;
+      if (qt.x1[nd] < ax0 || qt.x0[nd] > ax1 || qt.y1[nd] < ay0 || qt.y0[nd] > ay1) continue;   // boxes don't overlap
+      const c = qt.child[nd];
+      if (c < 0) { for (let k = qt.start[nd], e = k + qt.count[nd]; k < e; k++) cand[m++] = qt.items[k]; }
+      else { qstack[sp++] = c; qstack[sp++] = c + 1; qstack[sp++] = c + 2; qstack[sp++] = c + 3; }
+    }
+    return m;
+  }
+
+  // ---------- Broad phase dispatcher ----------
+  const mode = () => !settings.useGrid ? 'brute' : settings.quadtree ? 'quad' : 'grid';
+  const modeName = m => m === 'brute' ? 'BRUTE FORCE' : m === 'quad' ? 'QUADTREE' : `GRID ${grid.s || settings.cellSize}`;
+  function gather(x, y, R) {
+    const m = mode();
+    if (m === 'grid') return gridGather(x, y, R);
+    if (m === 'quad') return qtGather(x, y, R);
+    for (let i = 0; i < n; i++) cand[i] = i;   // brute force: everyone is a candidate
+    return n;
+  }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0, viewX = 0, viewY = 0;
+  function fit() {
+    const vw = settings.zoomOut ? WORLD.w : VIEW.w, vh = settings.zoomOut ? WORLD.h : VIEW.h;
+    S = Math.min(W / vw, H / vh);                       // scale to fit (Chapter 3)
+    OX = (W - vw * S) / 2; OY = (H - vh * S) / 2;
+  }
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    fit();
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { x: 0, y: 0, used: false };
+  let autoAim = true, autoAimLocked = false;
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) { started = true; }
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    if (k === ' ' && !e.repeat) novaWanted = true;
+    if (k === 't') { autoAim = !autoAim; autoAimLocked = true; }
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointermove', e => {
+    const r = canvas.getBoundingClientRect();
+    mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; mouse.used = true;
+    if (!autoAimLocked) autoAim = false;
+  });
+  canvas.addEventListener('pointerdown', e => {
+    const r = canvas.getBoundingClientRect();
+    mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top;
+    started = true; if (state.over) reset();
+  });
+  const mouseWorld = () => V((mouse.x - OX) / S + viewX, (mouse.y - OY) / S + viewY);
+
+  // ---------- State ----------
+  let state, player, bullets, fx, cam, stats, novaWanted = false, nearest = null, nearestTimer = 0;
+  let started = false, paused = false;
+  const HIST = 240;
+  const hist = { checks: new Float64Array(HIST), brute: new Float64Array(HIST), i: 0 };
+  const timing = { collideMs: 0, drawMs: 0, frameMs: 16.7, drawn: 0, inView: 0 };
+
+  function freshStats() {
+    return { unit: 0, bullet: 0, player: 0, other: 0, cells: 0, hits: 0, n: 0, m: 0, ms: 0, total: 0, brute: 0, killed: 0 };
+  }
+  function reset() {
+    state = { over: null, time: 0, kills: 0, spawnAcc: 0, nextPack: 15, peakUnits: 0, peakChecks: 0, bonus: 0 };
+    player = { x: WORLD.w / 2, y: WORLD.h / 2, hearts: HEARTS, invuln: 0, aim: V(1, 0), fireCd: 0, novaCd: 0 };
+    bullets = []; fx = []; n = 0; nearest = null;
+    cam = V(player.x - VIEW.w / 2, player.y - VIEW.h / 2);
+    stats = freshStats();
+    novaWanted = false;
+    for (let k = 0; k < 4; k++) spawnPack(12);
+  }
+
+  function spawnPack(size) {
+    let p = null;
+    for (let tries = 0; tries < 12 && !p; tries++) {
+      const a = rand(0, Math.PI * 2);
+      const q = V(player.x + Math.cos(a) * SPAWN_DIST, player.y + Math.sin(a) * SPAWN_DIST);
+      if (q.x > 30 && q.y > 30 && q.x < WORLD.w - 30 && q.y < WORLD.h - 30) p = q;
+    }
+    if (!p) p = V(player.x < WORLD.w / 2 ? WORLD.w - 40 : 40, player.y < WORLD.h / 2 ? WORLD.h - 40 : 40);
+    for (let k = 0; k < size && n < MAX_UNITS; k++) {
+      ux[n] = clamp(p.x + rand(-50, 50), UNIT_R, WORLD.w - UNIT_R);
+      uy[n] = clamp(p.y + rand(-50, 50), UNIT_R, WORLD.h - UNIT_R);
+      us[n] = rand(80, 110) + 0.2 * state.time;
+      dead[n] = 0; n++;
+    }
+  }
+
+  function killUnit(j, credit) {
+    dead[j] = 1; stats.killed++;
+    if (credit) state.kills++;
+    if (fx.length < 250) fx.push({ x: ux[j], y: uy[j], t: 0, big: false });
+  }
+
+  // ---------- Collisions: broad phase, then narrow phase ----------
+  function collide() {
+    const t0 = performance.now();
+    stats = freshStats();
+    const m = mode();
+    stats.n = n; stats.m = bullets.length;
+    if (m === 'grid') buildGrid(); else if (m === 'quad') buildQuadtree();
+    if (m !== 'grid') grid.built = false;
+    if (m !== 'quad') qt.built = false;
+
+    // 1. Unit vs unit: push overlapping units apart (each pair once: j > i)
+    const R2 = UNIT_REACH * UNIT_REACH;
+    for (let i = 0; i < n; i++) {
+      if (m === 'brute') {
+        for (let j = i + 1; j < n; j++) {
+          stats.unit++;
+          const dx = ux[j] - ux[i], dy = uy[j] - uy[i], d2 = dx * dx + dy * dy;
+          if (d2 < R2) separate(i, j, dx, dy, d2);
+        }
+      } else {
+        const c = gather(ux[i], uy[i], UNIT_REACH);
+        for (let k = 0; k < c; k++) {
+          const j = cand[k];
+          if (j <= i) continue;
+          stats.unit++;
+          const dx = ux[j] - ux[i], dy = uy[j] - uy[i], d2 = dx * dx + dy * dy;
+          if (d2 < R2) separate(i, j, dx, dy, d2);
+        }
+      }
+    }
+
+    // 2. Bullets vs units
+    const B2 = BULLET_REACH * BULLET_REACH;
+    for (const b of bullets) {
+      if (b.life <= 0) continue;
+      const c = gather(b.x, b.y, BULLET_REACH);
+      for (let k = 0; k < c; k++) {
+        const j = cand[k];
+        if (dead[j]) continue;
+        stats.bullet++;
+        const dx = ux[j] - b.x, dy = uy[j] - b.y;
+        if (dx * dx + dy * dy < B2) { killUnit(j, true); b.life = 0; stats.hits++; break; }
+      }
+    }
+
+    // 3. Player vs units
+    const P2 = PLAYER_REACH * PLAYER_REACH;
+    let touched = false;
+    const c = gather(player.x, player.y, PLAYER_REACH);
+    for (let k = 0; k < c; k++) {
+      const j = cand[k];
+      if (dead[j]) continue;
+      stats.player++;
+      const dx = ux[j] - player.x, dy = uy[j] - player.y, d2 = dx * dx + dy * dy;
+      if (d2 < P2) {
+        touched = true; stats.hits++;
+        const d = Math.sqrt(d2) || 0.01;                    // push the unit out of the player
+        ux[j] = player.x + dx / d * PLAYER_REACH; uy[j] = player.y + dy / d * PLAYER_REACH;
+      }
+    }
+    if (touched && player.invuln <= 0) hurtPlayer();
+
+    stats.ms = performance.now() - t0;
+  }
+  function separate(i, j, dx, dy, d2) {
+    stats.hits++;
+    let d = Math.sqrt(d2);
+    if (d < 0.001) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d = Math.hypot(dx, dy); }
+    const push = (UNIT_REACH - d) * 0.4 / d;
+    ux[i] -= dx * push; uy[i] -= dy * push;
+    ux[j] += dx * push; uy[j] += dy * push;
+  }
+
+  // Everything within radius R of (x, y): a radius query through the broad phase
+  function killWithin(x, y, R, credit) {
+    const c = gather(x, y, R), R2 = R * R;
+    let k0 = 0;
+    for (let k = 0; k < c; k++) {
+      const j = cand[k];
+      if (dead[j]) continue;
+      stats.other++;
+      const dx = ux[j] - x, dy = uy[j] - y;
+      if (dx * dx + dy * dy < R2) { killUnit(j, credit); k0++; }
+    }
+    return k0;
+  }
+  function hurtPlayer() {
+    player.hearts--; player.invuln = 1.5;
+    killWithin(player.x, player.y, SHOCK_R, false);
+    fx.push({ x: player.x, y: player.y, t: 0, big: true, r: SHOCK_R, color: '#ff6b6b' });
+    if (player.hearts <= 0) state.over = 'lost';
+  }
+  // Nearest unit: search a growing box until a unit lies inside the search radius
+  function findNearest(x, y) {
+    if (n === 0) return null;
+    let best = -1, bd = Infinity;
+    if (mode() === 'brute') {
+      for (let j = 0; j < n; j++) {
+        if (dead[j]) continue;
+        stats.other++;
+        const d = Math.hypot(ux[j] - x, uy[j] - y);
+        if (d < bd) { bd = d; best = j; }
+      }
+      return best < 0 ? null : V(ux[best], uy[best]);
+    }
+    for (let R = 120; R <= 3000; R *= 2) {
+      const c = gather(x, y, R);
+      for (let k = 0; k < c; k++) {
+        const j = cand[k];
+        if (dead[j]) continue;
+        stats.other++;
+        const d = Math.hypot(ux[j] - x, uy[j] - y);
+        if (d < bd) { bd = d; best = j; }
+      }
+      if (best >= 0 && bd <= R) return V(ux[best], uy[best]);
+    }
+    return best < 0 ? null : V(ux[best], uy[best]);
+  }
+
+  function alive() { let a = 0; for (let i = 0; i < n; i++) if (!dead[i]) a++; return a; }
+  function compact() {
+    let w = 0;
+    for (let i = 0; i < n; i++) {
+      if (!dead[i]) { ux[w] = ux[i]; uy[w] = uy[i]; us[w] = us[i]; w++; }
+      dead[i] = 0;
+    }
+    n = w;
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    compact();                     // remove the units killed last frame
+    for (const f of fx) f.t += dt;
+    fx = fx.filter(f => f.t < (f.big ? 0.5 : 0.3));
+    if (state.over) return;
+    state.time += dt;
+    if (state.time >= GAME_TIME) { state.time = GAME_TIME; state.over = 'won'; return; }
+    if (Math.floor(state.time / 60) > state.bonus) {             // a heart back every minute
+      state.bonus++; player.hearts = Math.min(HEARTS, player.hearts + 1);
+    }
+
+    // Spawning: 8 + 0.4t units per second, in packs
+    state.spawnAcc += (SPAWN_BASE + SPAWN_GROWTH * state.time) * dt;
+    while (state.spawnAcc >= state.nextPack) {
+      if (n >= MAX_UNITS) { state.spawnAcc = 0; break; }
+      spawnPack(state.nextPack);
+      state.spawnAcc -= state.nextPack;
+      state.nextPack = Math.floor(rand(10, 31));
+    }
+
+    // Player
+    const ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    const il = Math.hypot(ix, iy) || 1;
+    player.x = clamp(player.x + ix / il * PLAYER_SPEED * dt, PLAYER_R, WORLD.w - PLAYER_R);
+    player.y = clamp(player.y + iy / il * PLAYER_SPEED * dt, PLAYER_R, WORLD.h - PLAYER_R);
+    player.invuln -= dt;
+    player.novaCd = Math.max(0, player.novaCd - dt);
+    cam.x = clamp(player.x - VIEW.w / 2, 0, WORLD.w - VIEW.w);
+    cam.y = clamp(player.y - VIEW.h / 2, 0, WORLD.h - VIEW.h);
+
+    // Aim and fire
+    let aimAt = null;
+    if (autoAim) aimAt = nearest;
+    else if (mouse.used) aimAt = mouseWorld();
+    if (aimAt) {
+      const ax = aimAt.x - player.x, ay = aimAt.y - player.y, al = Math.hypot(ax, ay);
+      if (al > 1) player.aim = V(ax / al, ay / al);
+    }
+    const level = Math.min(MAX_LEVEL, 1 + Math.floor(state.kills / KILLS_PER_LEVEL));
+    player.fireCd -= dt;
+    while (player.fireCd <= 0) {
+      player.fireCd += 1 / FIRE_RATE;
+      const base = Math.atan2(player.aim.y, player.aim.x);
+      for (let k = 0; k < level; k++) {
+        const a = base + (k - (level - 1) / 2) * SPREAD;
+        const dx = Math.cos(a), dy = Math.sin(a);
+        bullets.push({ x: player.x + dx * (PLAYER_R + 2), y: player.y + dy * (PLAYER_R + 2),
+          vx: dx * BULLET_SPEED, vy: dy * BULLET_SPEED, life: BULLET_LIFE });
+      }
+    }
+
+    // Units drift with the swarm's flow, and chase the player when close
+    const t = state.time;
+    for (let i = 0; i < n; i++) {
+      const x = ux[i], y = uy[i];
+      const dx = player.x - x, dy = player.y - y, l = Math.hypot(dx, dy);
+      if (l < AGGRO) {
+        if (l > 0.001) { ux[i] += dx / l * us[i] * dt; uy[i] += dy / l * us[i] * dt; }
+      } else {
+        const a = 2.2 * Math.sin(x * 0.0031 + t * 0.21) + 2.2 * Math.cos(y * 0.0043 - t * 0.17) + 1.3 * Math.sin((x + y) * 0.0017 + t * 0.11);
+        let fx = Math.cos(a), fy = Math.sin(a);
+        if (x < 100) fx += 1; else if (x > WORLD.w - 100) fx -= 1;     // turn back from the walls
+        if (y < 100) fy += 1; else if (y > WORLD.h - 100) fy -= 1;
+        const fl = Math.hypot(fx, fy) || 1, sp = us[i] * DRIFT;
+        ux[i] += fx / fl * sp * dt; uy[i] += fy / fl * sp * dt;
+      }
+    }
+    // Bullets fly
+    for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt; }
+
+    // Broad phase + narrow phase
+    collide();
+    for (let i = 0; i < n; i++) {
+      ux[i] = clamp(ux[i], UNIT_R, WORLD.w - UNIT_R);
+      uy[i] = clamp(uy[i], UNIT_R, WORLD.h - UNIT_R);
+    }
+
+    // Nova: every unit within 220 of the player
+    if (novaWanted) {
+      novaWanted = false;
+      if (player.novaCd <= 0) {
+        killWithin(player.x, player.y, NOVA_R, true);
+        player.novaCd = NOVA_COOLDOWN;
+        fx.push({ x: player.x, y: player.y, t: 0, big: true, r: NOVA_R, color: '#6cb8ff' });
+      }
+    }
+    // Nearest-unit query for auto-aim, ten times a second
+    nearestTimer -= dt;
+    if (nearestTimer <= 0) { nearest = findNearest(player.x, player.y); nearestTimer = 0.1; }
+
+    stats.total = stats.unit + stats.bullet + stats.player + stats.other;
+    stats.brute = pairs(stats.n) + stats.m * stats.n + stats.n;
+    state.peakChecks = Math.max(state.peakChecks, stats.total);
+
+    bullets = bullets.filter(b => b.life > 0 && b.x > 0 && b.y > 0 && b.x < WORLD.w && b.y < WORLD.h);
+    state.peakUnits = Math.max(state.peakUnits, n - stats.killed);
+    timing.collideMs += (stats.ms - timing.collideMs) * 0.1;
+    hist.checks[hist.i] = stats.total; hist.brute[hist.i] = stats.brute; hist.i = (hist.i + 1) % HIST;
+  }
+
+  // ---------- Drawing ----------
+  let TS = 1;   // text scale: larger text when zoomed out
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size * TS}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3 * TS; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(x, y, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  const inView = (x, y, r) => !(x + r < cam.x || x - r > cam.x + VIEW.w || y + r < cam.y || y - r > cam.y + VIEW.h);
+
+  function render() {
+    fit();
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    const zoom = settings.zoomOut;
+    viewX = zoom ? 0 : cam.x; viewY = zoom ? 0 : cam.y;
+    const vw = zoom ? WORLD.w : VIEW.w, vh = zoom ? WORLD.h : VIEW.h;
+    TS = zoom ? 2 : 1;
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * (OX - viewX * S), DPR * (OY - viewY * S));
+    ctx.save();
+    ctx.beginPath(); ctx.rect(viewX, viewY, vw, vh); ctx.clip();
+
+    ctx.fillStyle = '#131720'; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+    ctx.strokeStyle = '#1a1f29'; ctx.lineWidth = 1 * TS; ctx.beginPath();
+    for (let x = Math.floor(viewX / 100) * 100; x <= viewX + vw; x += 100) { ctx.moveTo(x, viewY); ctx.lineTo(x, viewY + vh); }
+    for (let y = Math.floor(viewY / 100) * 100; y <= viewY + vh; y += 100) { ctx.moveTo(viewX, y); ctx.lineTo(viewX + vw, y); }
+    ctx.stroke();
+    ctx.strokeStyle = '#2b3242'; ctx.lineWidth = 4 * TS; ctx.strokeRect(0, 0, WORLD.w, WORLD.h);
+
+    for (const l of LENSES) if (l.on && l.under) l.under();
+
+    // Units, culled against the camera's view box (an AABB overlap test)
+    const t0 = performance.now();
+    let drawn = 0, visible = 0;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      if (dead[i]) continue;
+      const x = ux[i], y = uy[i];
+      const vis = inView(x, y, UNIT_R);
+      if (vis) visible++;
+      if (settings.cull && !vis) continue;
+      ctx.moveTo(x + UNIT_R, y); ctx.arc(x, y, UNIT_R, 0, Math.PI * 2);
+      drawn++;
+    }
+    ctx.fillStyle = '#ff6b6b'; ctx.fill();
+    timing.drawMs += (performance.now() - t0 - timing.drawMs) * 0.1;
+    timing.drawn = drawn; timing.inView = visible;
+    if (zoom && settings.cull) {             // show what culling skipped (only in the zoomed-out lens view)
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        if (dead[i] || inView(ux[i], uy[i], UNIT_R)) continue;
+        ctx.moveTo(ux[i] + UNIT_R, uy[i]); ctx.arc(ux[i], uy[i], UNIT_R, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = 'rgba(154,163,178,.35)'; ctx.fill();
+    }
+
+    // Bullets
+    ctx.beginPath();
+    for (const b of bullets) { ctx.moveTo(b.x + BULLET_R, b.y); ctx.arc(b.x, b.y, BULLET_R, 0, Math.PI * 2); }
+    ctx.fillStyle = '#ffd166'; ctx.fill();
+
+    // Effects
+    for (const f of fx) {
+      if (f.big) {
+        const k = f.t / 0.5;
+        circle(f.x, f.y, f.r * (0.3 + 0.7 * k), null, f.color, 4 * (1 - k) + 1);
+      } else {
+        ctx.globalAlpha = 1 - f.t / 0.3;
+        circle(f.x, f.y, UNIT_R + f.t * 40, null, '#ffb547', 1.5);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // Player
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 12) % 2 === 0;
+    if (!blink) {
+      circle(player.x, player.y, PLAYER_R, '#2a5d8f', '#6cb8ff', 3);
+      ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(player.x, player.y);
+      ctx.lineTo(player.x + player.aim.x * (PLAYER_R + 8), player.y + player.aim.y * (PLAYER_R + 8)); ctx.stroke();
+    }
+    if (player.novaCd <= 0 && started && !state.over) circle(player.x, player.y, PLAYER_R + 5, null, 'rgba(108,184,255,.45)', 1.5);
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    if (zoom) {
+      ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 2 * TS; ctx.setLineDash([12, 8]);
+      ctx.strokeRect(cam.x, cam.y, VIEW.w, VIEW.h); ctx.setLineDash([]);
+      text('camera view', cam.x + 8, cam.y - 10, '#ffd166', 13);
+    }
+    ctx.restore();
+
+    // ---------- Screen-space HUD ----------
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    TS = 1;
+    const left = OX + 12, right = OX + vw * S - 12, top = OY + 24;
+    text('♥'.repeat(Math.max(0, player.hearts)) + '♡'.repeat(HEARTS - Math.max(0, player.hearts)), left, top, '#ff6b6b', 18);
+    const level = Math.min(MAX_LEVEL, 1 + Math.floor(state.kills / KILLS_PER_LEVEL));
+    const left_t = Math.max(0, GAME_TIME - state.time);
+    const mm = Math.floor(left_t / 60), ss = Math.floor(left_t % 60).toString().padStart(2, '0');
+    text(`${mm}:${ss} left   kills ${state.kills}   units ${fmt(alive())}   gun ×${level}   nova ${player.novaCd > 0 ? Math.ceil(player.novaCd) + 's' : 'ready'}${autoAim ? '   auto-aim' : ''}`,
+      left, top + 20, '#9aa3b2', 13);
+    const m = mode();
+    text(`checks/frame ${fmt(stats.total)}   collisions ${f2(timing.collideMs)} ms   ${f0(1000 / timing.frameMs)} fps   ${modeName(m)}`,
+      right, top, m === 'brute' ? '#ff6b6b' : '#5fd18b', 13, 'right');
+    if (!zoom) drawMinimap(OX + vw * S - 192, OY + vh * S - 132, 180, 120);
+    for (const l of LENSES) if (l.on && l.screen) l.screen(left, top + 40);
+
+    if (!started) overlay('SWARM', ['Survive 3:00 against a swarm that grows into the thousands', 'WASD to move · the mouse aims, the gun fires itself · Space for a nova blast', 'Press any key to start']);
+    else if (state.over === 'won') overlay('SURVIVED', [`${state.kills} kills · peak ${fmt(state.peakUnits)} units · peak ${fmt(state.peakChecks)} checks per frame`, 'Press R or click to play again']);
+    else if (state.over === 'lost') overlay('OVERRUN', [`${state.kills} kills · survived ${state.time.toFixed(1)} s · peak ${fmt(state.peakUnits)} units`, 'Press R or click to try again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  // The minimap counts units in a coarse 100 × 100 grid: a spatial grid of its own
+  const MINI = new Uint16Array(24 * 16);
+  function drawMinimap(x, y, w, h) {
+    MINI.fill(0);
+    for (let i = 0; i < n; i++) if (!dead[i]) MINI[Math.min(15, Math.floor(uy[i] / 100)) * 24 + Math.min(23, Math.floor(ux[i] / 100))]++;
+    ctx.fillStyle = 'rgba(15,18,24,.85)'; ctx.fillRect(x, y, w, h);
+    const cw = w / 24, ch = h / 16;
+    for (let j = 0; j < 16; j++) for (let i = 0; i < 24; i++) {
+      const c = MINI[j * 24 + i];
+      if (!c) continue;
+      ctx.fillStyle = `rgba(255,107,107,${Math.min(0.9, 0.15 + c * 0.03)})`;
+      ctx.fillRect(x + i * cw, y + j * ch, cw, ch);
+    }
+    const k = w / WORLD.w;
+    ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 1;
+    ctx.strokeRect(x + cam.x * k, y + cam.y * k, VIEW.w * k, VIEW.h * k);
+    ctx.fillStyle = '#6cb8ff'; ctx.fillRect(x + player.x * k - 2, y + player.y * k - 2, 4, 4);
+    ctx.strokeStyle = '#2a3140'; ctx.strokeRect(x, y, w, h);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  function nearestK(x, y, k) {
+    const best = [];
+    for (let i = 0; i < n; i++) {
+      if (dead[i]) continue;
+      const d = (ux[i] - x) ** 2 + (uy[i] - y) ** 2;
+      if (best.length < k || d < best[best.length - 1].d) {
+        best.push({ i, d }); best.sort((a, b) => a.d - b.d);
+        if (best.length > k) best.pop();
+      }
+    }
+    return best.map(b => b.i);
+  }
+  function focusUnit() {
+    const p = autoAim || !mouse.used ? V(player.x, player.y) : mouseWorld();
+    const k = nearestK(p.x, p.y, 1);
+    return k.length ? k[0] : -1;
+  }
+  // Run a broad-phase query for display only, without adding to the frame's counts
+  function quietGather(x, y, R) { const c0 = stats.cells; const c = gather(x, y, R); stats.cells = c0; return c; }
+  function structureReady() {
+    const m = mode();
+    return m === 'brute' || (m === 'grid' && grid.built) || (m === 'quad' && qt.built);
+  }
+  const dirName = (x, y, mx, my) => (y < my ? 'N' : 'S') + (x < mx ? 'W' : 'E');
+
+  const LENSES = [
+    {
+      name: 'Pair count', chap: 'Chapter 23.1–23.2',
+      formula: 'pairs = n(n − 1) / 2\nbrute force = n(n−1)/2 + m·n + n\n  (units, bullets × units, player)',
+      used: ['Deciding whether "check everything" is fast enough', 'Collision budgets for bullet-hell games',
+        'Crowds, flocks and RTS armies', 'Profiling: counting work per frame'],
+      tryThis: 'The 12 units nearest you already have 66 pairs. Untick "Use spatial grid" and watch the red line: the brute-force count grows with n², the grid count only with n.',
+      controls: `<label><input type="checkbox" data-set="useGrid"> Use spatial grid</label>`,
+      draw() {
+        const near = nearestK(player.x, player.y, 12);
+        ctx.strokeStyle = 'rgba(255,209,102,.35)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let a = 0; a < near.length; a++) for (let b = a + 1; b < near.length; b++) {
+          ctx.moveTo(ux[near[a]], uy[near[a]]); ctx.lineTo(ux[near[b]], uy[near[b]]);
+        }
+        ctx.stroke();
+        for (const i of near) circle(ux[i], uy[i], UNIT_R + 3, null, '#ffd166', 1.5);
+        const k = near.length;
+        text(`${k} units → ${k}×${Math.max(0, k - 1)}/2 = ${pairs(k)} pairs`, player.x, player.y - 30, '#ffd166', 13, 'center');
+      },
+      screen(x, y) {
+        const w = 260, h = 90;
+        ctx.fillStyle = 'rgba(15,18,24,.85)'; ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+        const Y = v => y + h - 8 - (h - 22) * Math.min(1, Math.log10(Math.max(1, v)) / 7);
+        for (const [arr, color] of [[hist.brute, '#ff6b6b'], [hist.checks, '#5fd18b']]) {
+          ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+          for (let k = 0; k < HIST; k++) {
+            const v = arr[(hist.i + k) % HIST];
+            const px = x + 4 + (w - 8) * k / (HIST - 1);
+            if (k === 0) ctx.moveTo(px, Y(v)); else ctx.lineTo(px, Y(v));
+          }
+          ctx.stroke();
+        }
+        text('checks per frame (log scale, 1 to 10 million)', x + 6, y + 13, '#9aa3b2', 10.5);
+        text('brute force', x + w - 6, Y(stats.brute) - 4, '#ff6b6b', 10.5, 'right');
+        text('actual', x + w - 6, Math.min(y + h - 2, Y(stats.total) + 12), '#5fd18b', 10.5, 'right');
+      },
+      live() {
+        const N = stats.n, M = stats.m;
+        const ratio = stats.total > 0 ? stats.brute / stats.total : 1;
+        return `units n      ${fmt(N)}\nbullets m    ${M}\n\nbrute force would check\n n(n−1)/2 = ${fmt(N)}×${fmt(Math.max(0, N - 1))}/2\n          = ${fmt(pairs(N))}\n m × n    = ${M}×${fmt(N)} = ${fmt(M * N)}\n player   = ${fmt(N)}\n total    = ${fmt(stats.brute)}\n\nthis frame (${modeName(mode())})\n checks   = ${fmt(stats.total)}  (${ratio >= 1.05 ? f0(ratio) + '× fewer' : 'all of them'})\n collision time ${f2(timing.collideMs)} ms`;
+      },
+    },
+    {
+      name: 'Spatial grid', chap: 'Chapter 23.3–23.6',
+      formula: 'cell = (floor(x / s), floor(y / s))\nindex k = j × cols + i\ncheck only the cells the box\n[x − R, x + R] × [y − R, y + R] touches',
+      used: ['Bullet-hell and survivor games with thousands of objects', 'Particle collisions and fluid neighbors',
+        'RTS unit separation', 'Fast "what is near me?" queries'],
+      tryThis: 'Untick "Use spatial grid" when the swarm is big: checks jump into the millions and the collision time climbs. Then drag the cell size to 8 (many cells to visit) and to 160 (huge cells full of units).',
+      controls: `<label><input type="checkbox" data-set="useGrid"> Use spatial grid</label>
+        <label>Cell size s <input type="range" min="8" max="160" step="4" data-set="cellSize"> <span data-show="cellSize"></span></label>`,
+      draw() {
+        const m = mode();
+        if (m !== 'grid' || !grid.built) {
+          text(m === 'brute' ? 'brute force: no grid, every pair is checked' : 'quadtree in use (lens 4)', player.x, player.y - 30, m === 'brute' ? '#ff6b6b' : '#b48cff', 13, 'center');
+          return;
+        }
+        const s = grid.s, vw = settings.zoomOut ? WORLD.w : VIEW.w, vh = settings.zoomOut ? WORLD.h : VIEW.h;
+        const r = gridRange(viewX + vw / 2, viewY + vh / 2, Math.max(vw, vh) / 2);
+        for (let j = r.j0; j <= r.j1; j++) for (let i = r.i0; i <= r.i1; i++) {
+          const c = j * grid.cols + i, cnt = grid.start[c + 1] - grid.start[c];
+          if (!cnt) continue;
+          ctx.fillStyle = `rgba(108,184,255,${Math.min(0.45, 0.05 + cnt * 0.04)})`;
+          ctx.fillRect(i * s, j * s, s, s);
+        }
+        ctx.strokeStyle = 'rgba(108,184,255,.22)'; ctx.lineWidth = 1 * TS; ctx.beginPath();
+        for (let i = r.i0; i <= r.i1 + 1; i++) { ctx.moveTo(i * s, r.j0 * s); ctx.lineTo(i * s, (r.j1 + 1) * s); }
+        for (let j = r.j0; j <= r.j1 + 1; j++) { ctx.moveTo(r.i0 * s, j * s); ctx.lineTo((r.i1 + 1) * s, j * s); }
+        ctx.stroke();
+        const q = gridRange(player.x, player.y, PLAYER_REACH);
+        ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 2;
+        ctx.strokeRect(q.i0 * s, q.j0 * s, (q.i1 - q.i0 + 1) * s, (q.j1 - q.j0 + 1) * s);
+        ctx.setLineDash([4, 4]); ctx.strokeStyle = '#e6e9ef'; ctx.lineWidth = 1;
+        ctx.strokeRect(player.x - PLAYER_REACH, player.y - PLAYER_REACH, 2 * PLAYER_REACH, 2 * PLAYER_REACH);
+        ctx.setLineDash([]);
+        text(`cell (${Math.floor(player.x / s)}, ${Math.floor(player.y / s)})`, player.x, q.j0 * s - 8, '#ffd166', 13, 'center');
+      },
+      live() {
+        const m = mode();
+        if (m === 'brute') return `BRUTE FORCE (grid off)\nunits ${fmt(stats.n)}\npair checks = n(n−1)/2 = ${fmt(stats.unit)}\nall checks this frame   ${fmt(stats.total)}\ncollision time ${f2(timing.collideMs)} ms\nframe time     ${f1(timing.frameMs)} ms`;
+        if (m === 'quad') return 'quadtree in use (see lens 4)';
+        const s = settings.cellSize, cols = Math.ceil(WORLD.w / s), rows = Math.ceil(WORLD.h / s);
+        const i = Math.floor(player.x / s), j = Math.floor(player.y / s);
+        const q = gridRange(player.x, player.y, PLAYER_REACH);
+        const nc = (q.i1 - q.i0 + 1) * (q.j1 - q.j0 + 1);
+        let inCells = 0;
+        if (grid.built) for (let b = q.j0; b <= q.j1; b++) for (let a = q.i0; a <= q.i1; a++) { const c = b * grid.cols + a; inCells += grid.start[c + 1] - grid.start[c]; }
+        return `cell size s = ${s}\ngrid ${cols} × ${rows} = ${fmt(cols * rows)} cells\n\nplayer (${f0(player.x)}, ${f0(player.y)})\n cell = (floor(${f0(player.x)}/${s}), floor(${f0(player.y)}/${s}))\n      = (${i}, ${j})\n k = ${j}×${cols} + ${i} = ${fmt(j * cols + i)}\n reach 18 → cells ${q.i0}–${q.i1} × ${q.j0}–${q.j1} (${nc})\n units in them: ${inCells}\n\nthis frame\n cells visited  ${fmt(stats.cells)}\n checks         ${fmt(stats.total)}\n brute force    ${fmt(stats.brute)}\n collision time ${f2(timing.collideMs)} ms\n frame time     ${f1(timing.frameMs)} ms`;
+      },
+    },
+    {
+      name: 'Broad & narrow', chap: 'Chapter 23.7',
+      formula: 'broad phase: grid → candidate pairs\n  (cheap, may include extras)\nnarrow phase: d² < (r₁ + r₂)²\n  (exact, only on candidates)',
+      used: ['Every physics engine: broad phase, then narrow phase', 'Bounding circles and boxes around complex shapes',
+        'Hit-scan weapons: candidates first, exact test after', 'Trigger volumes and pickups'],
+      tryThis: 'Point the mouse at the swarm. The unit under the cursor shows its broad-phase candidates (yellow) and the few that really touch it (red). Most candidates fail the exact test, and that is fine.',
+      draw() {
+        const f = focusUnit();
+        if (f < 0 || !structureReady()) return;
+        const x = ux[f], y = uy[f];
+        ctx.setLineDash([4, 4]); ctx.strokeStyle = '#e6e9ef'; ctx.lineWidth = 1;
+        ctx.strokeRect(x - UNIT_REACH, y - UNIT_REACH, 2 * UNIT_REACH, 2 * UNIT_REACH); ctx.setLineDash([]);
+        circle(x, y, UNIT_REACH, null, 'rgba(230,233,239,.6)', 1);
+        const m = mode();
+        if (m === 'grid') {
+          const q = gridRange(x, y, UNIT_REACH), s = grid.s;
+          ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 1.5;
+          ctx.strokeRect(q.i0 * s, q.j0 * s, (q.i1 - q.i0 + 1) * s, (q.j1 - q.j0 + 1) * s);
+        }
+        let c = m === 'brute' ? 0 : quietGather(x, y, UNIT_REACH);
+        const list = m === 'brute' ? [] : Array.from(cand.subarray(0, c));
+        for (const j of list) {
+          if (j === f || dead[j]) continue;
+          const d = Math.hypot(ux[j] - x, uy[j] - y);
+          circle(ux[j], uy[j], UNIT_R + 2.5, null, d < UNIT_REACH ? '#ff6b6b' : '#ffd166', 2);
+        }
+        circle(x, y, UNIT_R + 2.5, null, '#ffffff', 2.5);
+        text(m === 'brute' ? `brute force: all ${fmt(n - 1)} others are candidates` : `${Math.max(0, c - 1)} candidates`, x, y - 22, '#ffd166', 13, 'center');
+      },
+      live() {
+        const f = focusUnit();
+        let s = `whole frame\n narrow-phase tests  ${fmt(stats.total)}\n real contacts       ${fmt(stats.hits)}\n useful             ${stats.total ? f1(100 * stats.hits / stats.total) : '0.0'}%\n`;
+        if (f >= 0 && structureReady()) {
+          const m = mode(), x = ux[f], y = uy[f];
+          let cnt = 0, hit = 0;
+          if (m === 'brute') { cnt = n - 1; for (let j = 0; j < n; j++) if (j !== f && Math.hypot(ux[j] - x, uy[j] - y) < UNIT_REACH) hit++; }
+          else {
+            const c = quietGather(x, y, UNIT_REACH);
+            for (let k = 0; k < c; k++) { const j = cand[k]; if (j === f) continue; cnt++; if (Math.hypot(ux[j] - x, uy[j] - y) < UNIT_REACH) hit++; }
+          }
+          s += `\nunit under the cursor (${f0(x)}, ${f0(y)})\n broad phase  ${fmt(cnt)} candidates\n narrow phase ${hit} touching (d < ${UNIT_REACH})`;
+        }
+        return s;
+      },
+    },
+    {
+      name: 'Quadtree', chap: 'Chapter 23.8',
+      formula: 'split a node into 4 when it holds\nmore than 8 units (max depth 8)\nquery: visit only nodes whose box\noverlaps the query box',
+      used: ['Open worlds with crowded and empty areas', 'Octrees for 3D scenes and voxel worlds',
+        'Picking: which object is under the mouse?', 'Level-of-detail and terrain'],
+      tryThis: 'Lead the swarm into one corner: the tree splits deep where units crowd and stays coarse elsewhere. Tick "Use quadtree" to make it the broad phase and compare the check count with the grid.',
+      controls: `<label><input type="checkbox" data-set="quadtree"> Use quadtree instead of the grid</label>`,
+      under() {
+        if (!qt.built) { buildQuadtree(); qt.built = mode() === 'quad'; }   // display only
+        ctx.strokeStyle = 'rgba(180,140,255,.45)'; ctx.lineWidth = 1 * TS;
+        ctx.beginPath();
+        for (let k = 0; k < qt.nodes; k++) {
+          if (qt.child[k] >= 0) continue;
+          ctx.rect(qt.x0[k], qt.y0[k], qt.x1[k] - qt.x0[k], qt.y1[k] - qt.y0[k]);
+        }
+        ctx.stroke();
+        let nd = 0;
+        while (qt.child[nd] >= 0) {
+          const mx = (qt.x0[nd] + qt.x1[nd]) / 2, my = (qt.y0[nd] + qt.y1[nd]) / 2;
+          nd = qt.child[nd] + (player.y < my ? 0 : 2) + (player.x < mx ? 0 : 1);
+        }
+        ctx.strokeStyle = '#b48cff'; ctx.lineWidth = 2.5;
+        ctx.strokeRect(qt.x0[nd], qt.y0[nd], qt.x1[nd] - qt.x0[nd], qt.y1[nd] - qt.y0[nd]);
+      },
+      draw() {},
+      live() {
+        let nd = 0;
+        const path = [];
+        while (qt.nodes > 0 && qt.child[nd] >= 0) {
+          const mx = (qt.x0[nd] + qt.x1[nd]) / 2, my = (qt.y0[nd] + qt.y1[nd]) / 2;
+          path.push(dirName(player.x, player.y, mx, my));
+          nd = qt.child[nd] + (player.y < my ? 0 : 2) + (player.x < mx ? 0 : 1);
+        }
+        const d = qt.depth[nd];
+        const m = mode();
+        return `nodes ${fmt(qt.nodes)}   leaves ${fmt(qt.leaves)}\ndeepest level ${qt.maxDepth} (max ${QT_DEPTH})\nsmallest possible node\n ${WORLD.w}/2^${QT_DEPTH} × ${WORLD.h}/2^${QT_DEPTH} = ${f2(WORLD.w / 2 ** QT_DEPTH)} × ${f2(WORLD.h / 2 ** QT_DEPTH)}\n\nplayer's leaf: depth ${d}, ${qt.count[nd]} units\n path ${path.join(' → ') || '(root)'}\n size ${f1(qt.x1[nd] - qt.x0[nd])} × ${f1(qt.y1[nd] - qt.y0[nd])}\n\nbroad phase now: ${modeName(m)}\n checks this frame  ${fmt(stats.total)}\n nodes/cells visited ${fmt(stats.cells)}\n collision time ${f2(timing.collideMs)} ms`;
+      },
+    },
+    {
+      name: 'Culling', chap: 'Chapter 23.9',
+      formula: 'draw a unit only if its box\n[x − 6, x + 6] × [y − 6, y + 6]\noverlaps the view box\n[cx, cx + 1200] × [cy, cy + 800]',
+      used: ['Skipping off-screen sprites and particles', 'Frustum culling in 3D (planes, Chapter 21)',
+        'Pausing AI and animation far from the camera', 'Streaming parts of a big world'],
+      tryThis: 'Tick "Zoom out": gray units are outside the camera and were never drawn. Untick "Cull off-screen" and the drawn count jumps to every unit.',
+      controls: `<label><input type="checkbox" data-set="cull"> Cull off-screen</label>
+        <label><input type="checkbox" data-set="zoomOut"> Zoom out (show the whole world)</label>`,
+      draw() {},
+      live() {
+        return `camera view box\n x ${f0(cam.x)} … ${f0(cam.x + VIEW.w)}\n y ${f0(cam.y)} … ${f0(cam.y + VIEW.h)}\n\nunits         ${fmt(alive())}\ninside view   ${fmt(timing.inView)}\noutside view  ${fmt(alive() - timing.inView)}\ndrawn         ${fmt(timing.drawn)}${settings.cull ? '' : '  (culling off!)'}\ndraw time     ${f2(timing.drawMs)} ms`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see how many collision checks the swarm costs, and how the grid cuts them down.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+        if (key === 'zoomOut') fit();
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+
+  // ---------- Loop ----------
+  reset();
+  renderCard();
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const raw = (now - last) / 1000;
+    const dt = Math.min(raw, 0.1);
+    last = now;
+    timing.frameMs += (raw * 1000 - timing.frameMs) * 0.1;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wireframe Flyer</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Wireframe Flyer</h1>
+    <p class="sub">Fly through 40 rings before your fuel runs out. Every line on screen is a 3D point divided by its depth.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Climb / dive</b> W S / ↑ ↓ · <b>Turn</b> A D / ← → · <b>Boost</b> Space ·
+      <b>Scope zoom</b> hold Z or right mouse · <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- 2D and 3D vector math ----------
+  const V = (x = 0, y = 0) => ({ x, y });
+  const V3 = (x = 0, y = 0, z = 0) => ({ x, y, z });
+  const add3 = (a, b) => V3(a.x + b.x, a.y + b.y, a.z + b.z);
+  const sub3 = (a, b) => V3(a.x - b.x, a.y - b.y, a.z - b.z);
+  const mul3 = (a, s) => V3(a.x * s, a.y * s, a.z * s);
+  const dot3 = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+  const cross3 = (a, b) => V3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+  const len3 = a => Math.hypot(a.x, a.y, a.z);
+  const norm3 = a => { const l = len3(a); return l > 0 ? mul3(a, 1 / l) : V3(); };
+  const lerp3 = (a, b, t) => V3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const f0 = n => Math.round(n).toString();
+  const f1 = n => (Math.abs(n) < 0.05 ? 0 : n).toFixed(1);
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const RAD = Math.PI / 180, deg = r => r / RAD;
+  const P3 = p => `(${f1(p.x)}, ${f1(p.y)}, ${f1(p.z)})`;
+  function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+  // ---------- Settings (lens switches) ----------
+  const settings = {
+    divide: true,   // perspective divide (pitfall when off: orthographic)
+    clip: true,     // clip at the near plane (pitfall when off)
+    cull: true,     // frustum culling
+    sort: true,     // painter's algorithm
+    fov: 60,        // vertical field of view, degrees
+    near: 1,        // near plane distance, meters
+  };
+
+  // ---------- Constants ----------
+  // 3D convention: x right, y UP, z FORWARD (world and camera alike). Screen: y DOWN.
+  const VW = 960, VH = 600, CX = VW / 2, CY = VH / 2, ASPECT = VW / VH;
+  const FAR = 900, ORTHO_REF = 60;          // orthographic scale = f ÷ 60
+  const SCOPE_FOV = 20;
+  const SPEED = 40, BOOST = 65;             // m/s
+  const YAW_RATE = 70 * RAD, PITCH_RATE = 55 * RAD, PITCH_MAX = 50 * RAD;
+  const RING_R = 7, BULLSEYE = 2.5, SPACING = 140, RINGS = 40;
+  const FUEL_START = 15, FUEL_PER_RING = 5, CRASH_COST = 5;
+  const CHASE_BACK = 12, CHASE_UP = 3;
+  const GRID = 40, GRID_REACH = 480;
+  const CEILING = 120;
+
+  // ---------- Canvas: virtual 960 × 600 screen, scaled to fit (Chapter 3) ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VW, H / VH);
+    OX = (W - VW * S) / 2; OY = (H - VH * S) / 2;
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  let rightMouse = false;
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) { started = true; }
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; rightMouse = false; });
+  canvas.addEventListener('pointerdown', e => {
+    if (e.button === 2) { rightMouse = true; return; }
+    if (!started) { started = true; return; }
+    if (state.over) reset();
+  });
+  addEventListener('pointerup', e => { if (e.button === 2) rightMouse = false; });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  // ---------- The course ----------
+  const rng = mulberry32(17);
+  const rnd = (a, b) => a + rng() * (b - a);
+  const course = [];
+  {
+    let p = V3(0, 0, 0);
+    for (let i = 0; i < RINGS; i++) {
+      const h = 0.55 * Math.sin(0.31 * i);
+      p = add3(p, V3(SPACING * Math.sin(h), 0, SPACING * Math.cos(h)));
+      course.push(V3(p.x, 22 + 8 * Math.sin(0.8 * i) + 4 * Math.sin(2.1 * i), p.z));
+    }
+  }
+  const objects = [];   // in course order: rings and pillars interleaved, mountains last
+  function horiz(a, b) { const d = sub3(b, a); d.y = 0; return norm3(d); }
+  function addBox(cx, cz, half, top) {
+    const min = V3(cx - half, 0, cz - half), max = V3(cx + half, top, cz + half);
+    const c = lerp3(min, max, 0.5);
+    objects.push({ type: 'pillar', min, max, c, r: len3(sub3(max, c)) });
+  }
+  course.forEach((c, i) => {
+    const prev = i > 0 ? course[i - 1] : V3(0, c.y, 0), next = i < RINGS - 1 ? course[i + 1] : add3(c, sub3(c, prev));
+    const n = horiz(prev, next), side = V3(n.z, 0, -n.x);
+    objects.push({ type: 'ring', index: i, c, n, side, r: RING_R });
+    if (i < RINGS - 1 && i >= 1) {
+      const m = lerp3(c, next, 0.5), dir = horiz(c, next), sd = V3(dir.z, 0, -dir.x);
+      const top = Math.max(c.y, next.y) + 22;
+      if (i % 5 === 3) { addBox(m.x + sd.x * 11, m.z + sd.z * 11, 3, top); addBox(m.x - sd.x * 11, m.z - sd.z * 11, 3, top); }
+      else if (i % 2 === 0) { const s = i % 4 === 0 ? 16 : -16; addBox(m.x + sd.x * s, m.z + sd.z * s, 4, top - 4); }
+    }
+  });
+  for (let i = -2; i < RINGS + 4; i += 2) {
+    const base = course[clamp(i, 0, RINGS - 1)];
+    const extra = i < 0 ? i * SPACING : i >= RINGS ? (i - RINGS + 1) * SPACING : 0;
+    for (const sgn of [-1, 1]) {
+      const w = rnd(50, 90), h = rnd(60, 150), d = rnd(220, 380);
+      const c = V3(base.x + sgn * d + rnd(-40, 40), 0, base.z + extra + rnd(-60, 60));
+      objects.push({ type: 'mountain', b: c, w, h, c: V3(c.x, h / 3, c.z), r: Math.hypot(w * 1.42, h) });
+    }
+  }
+  const rings = objects.filter(o => o.type === 'ring');
+  const pillars = objects.filter(o => o.type === 'pillar');
+
+  // Faces with outward normals (for back-face culling, Chapters 12–13)
+  for (const o of objects) {
+    if (o.type === 'pillar') {
+      const { min: a, max: b } = o;
+      const q = (x, y, z) => V3(x ? b.x : a.x, y ? b.y : a.y, z ? b.z : a.z);
+      o.faces = [
+        { pts: [q(0,0,0), q(0,1,0), q(1,1,0), q(1,0,0)], n: V3(0, 0, -1) },
+        { pts: [q(1,0,1), q(1,1,1), q(0,1,1), q(0,0,1)], n: V3(0, 0, 1) },
+        { pts: [q(0,0,1), q(0,1,1), q(0,1,0), q(0,0,0)], n: V3(-1, 0, 0) },
+        { pts: [q(1,0,0), q(1,1,0), q(1,1,1), q(1,0,1)], n: V3(1, 0, 0) },
+        { pts: [q(0,1,0), q(0,1,1), q(1,1,1), q(1,1,0)], n: V3(0, 1, 0) },
+      ];
+    } else if (o.type === 'mountain') {
+      const { b, w, h } = o, apex = V3(b.x, h, b.z);
+      const cs = [V3(b.x - w, 0, b.z - w), V3(b.x + w, 0, b.z - w), V3(b.x + w, 0, b.z + w), V3(b.x - w, 0, b.z + w)];
+      o.faces = cs.map((p, i) => {
+        const p2 = cs[(i + 1) % 4];
+        let n = norm3(cross3(sub3(p2, p), sub3(apex, p)));
+        const mid = mul3(add3(add3(p, p2), apex), 1 / 3);
+        if (dot3(n, sub3(mid, b)) < 0) n = mul3(n, -1);   // make it point outward
+        return { pts: [p, p2, apex], n };
+      });
+    }
+  }
+
+  // ---------- State ----------
+  let state, ship, cam, popups, stats, started = false, paused = false;
+  function reset() {
+    state = { over: null, time: 0, score: 0, fuel: FUEL_START, next: 0, passed: 0, combo: 0, invuln: 0, flash: 0 };
+    ship = { pos: V3(0, 22, 0), yaw: 0, pitch: 0, roll: 0, speed: SPEED, fov: settings.fov };
+    for (const r of rings) r.state = 'ahead';
+    popups = [];
+    updateCamera();
+  }
+
+  // Camera axes from yaw, pitch and roll (Chapter 19 explains 3D rotations properly)
+  function basis(yaw, pitch, roll) {
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const f = V3(cp * sy, sp, cp * cy);         // forward
+    const r0 = V3(cy, 0, -sy);                  // right, level
+    const u0 = cross3(f, r0);                   // up = f × r  (x right, y up, z forward)
+    const cr = Math.cos(roll), sr = Math.sin(roll);
+    return { f, r: sub3(mul3(r0, cr), mul3(u0, sr)), u: add3(mul3(u0, cr), mul3(r0, sr)) };
+  }
+  function updateCamera() {
+    const b = basis(ship.yaw, ship.pitch, ship.roll);
+    ship.axes = b;
+    cam = { pos: add3(sub3(ship.pos, mul3(b.f, CHASE_BACK)), mul3(b.u, CHASE_UP)), r: b.r, u: b.u, f: b.f };
+    const fov = ship.fov * RAD;
+    cam.F = (VH / 2) / Math.tan(fov / 2);                       // focal length in pixels
+    cam.tanV = Math.tan(fov / 2); cam.tanH = ASPECT * cam.tanV;
+    const V2 = fov / 2, H2 = Math.atan(cam.tanH);
+    cam.planes = [V3(Math.cos(H2), 0, Math.sin(H2)), V3(-Math.cos(H2), 0, Math.sin(H2)),
+      V3(0, Math.cos(V2), Math.sin(V2)), V3(0, -Math.cos(V2), Math.sin(V2))];
+  }
+
+  // ---------- The pipeline: world → view → (clip) → divide → pixels ----------
+  function toView(p) { const d = sub3(p, cam.pos); return V3(dot3(d, cam.r), dot3(d, cam.u), dot3(d, cam.f)); }
+  function project(v) {
+    if (settings.divide) return V(CX + cam.F * v.x / v.z, CY - cam.F * v.y / v.z);
+    const k = cam.F / ORTHO_REF;
+    return V(CX + k * v.x, CY - k * v.y);
+  }
+  // Clip a view-space segment against the near plane. Returns screen points or null.
+  function segment(a, b) {
+    stats.segs++;
+    const n = settings.near;
+    if (a.z > FAR && b.z > FAR) { stats.dropped++; return null; }
+    if (settings.clip) {
+      if (a.z < n && b.z < n) { stats.dropped++; return null; }
+      if (a.z < n || b.z < n) {
+        const t = (n - a.z) / (b.z - a.z), q = lerp3(a, b, t);
+        if (a.z < n) a = q; else b = q;
+        stats.clipped++;
+        const s = [project(a), project(b)];
+        if (clippedOn) clippedSegs.push(s);
+        return s;
+      }
+    }
+    return [project(a), project(b)];
+  }
+  // Sutherland–Hodgman against z = near, for filled faces
+  function clipPoly(pts) {
+    if (!settings.clip) return pts;
+    const n = settings.near, out = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length], ain = a.z >= n, bin = b.z >= n;
+      if (ain) out.push(a);
+      if (ain !== bin) out.push(lerp3(a, b, (n - a.z) / (b.z - a.z)));
+    }
+    return out;
+  }
+  // Is a bounding sphere (view space) inside the frustum?
+  function inFrustum(c, r) {
+    if (c.z + r < settings.near || c.z - r > FAR) return false;
+    if (!settings.divide) {
+      const k = cam.F / ORTHO_REF;
+      return Math.abs(c.x) - r <= CX / k && Math.abs(c.y) - r <= CY / k;
+    }
+    for (const p of cam.planes) if (dot3(p, c) < -r) return false;
+    return true;
+  }
+
+  // ---------- Update ----------
+  function popup(text, color, y = 200) { popups.push({ text, color, y, life: 1.3 }); }
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.y -= 20 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    const zoom = keys.z || rightMouse;
+    ship.fov += ((zoom ? SCOPE_FOV : settings.fov) - ship.fov) * (1 - Math.exp(-10 * dt));
+    if (state.over) { updateCamera(); return; }
+    state.time += dt;
+
+    const turn = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    const climb = (keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0);
+    const steer = zoom ? 0.4 : 1;                                  // finer control in the scope
+    ship.yaw += turn * YAW_RATE * steer * dt;
+    if (climb) ship.pitch = clamp(ship.pitch + climb * PITCH_RATE * steer * dt, -PITCH_MAX, PITCH_MAX);
+    else ship.pitch *= Math.exp(-1.0 * dt);                        // ease back to level
+    ship.roll += (turn * 25 * RAD - ship.roll) * (1 - Math.exp(-6 * dt));
+    ship.speed += ((keys[' '] ? BOOST : SPEED) - ship.speed) * (1 - Math.exp(-3 * dt));
+
+    const b = basis(ship.yaw, ship.pitch, 0);
+    const prev = ship.pos;
+    ship.pos = add3(ship.pos, mul3(b.f, ship.speed * dt));
+    if (ship.pos.y > CEILING) ship.pos.y = CEILING;
+
+    // Rings: did we cross the ring's plane this frame, and where?
+    const ring = rings[state.next];
+    if (ring) {
+      const s0 = dot3(sub3(prev, ring.c), ring.n), s1 = dot3(sub3(ship.pos, ring.c), ring.n);
+      if (s0 < 0 && s1 >= 0) {
+        const q = lerp3(prev, ship.pos, s0 / (s0 - s1)), miss = len3(sub3(q, ring.c));
+        if (miss <= RING_R) {
+          state.combo++; state.passed++;
+          let pts = 100 + 20 * (state.combo - 1);
+          if (miss <= BULLSEYE) pts += 50;
+          state.score += pts; state.fuel += FUEL_PER_RING; ring.state = 'passed';
+          popup(`${miss <= BULLSEYE ? 'BULLSEYE ' : ''}+${pts}   fuel +${FUEL_PER_RING} s`, '#5fd18b');
+        } else {
+          state.combo = 0; ring.state = 'missed';
+          popup(`missed by ${f1(miss - RING_R)} m`, '#ff6b6b');
+        }
+        state.next++;
+        if (state.next >= RINGS) { state.over = 'finish'; state.score += Math.round(state.fuel * 10); }
+      }
+    }
+
+    // Crashes
+    state.invuln -= dt; state.flash -= dt;
+    let crash = ship.pos.y < 1;
+    if (crash) { ship.pos.y = 6; ship.pitch = 15 * RAD; }
+    if (state.invuln <= 0) for (const o of pillars) {
+      const p = ship.pos;
+      if (p.x > o.min.x - 1 && p.x < o.max.x + 1 && p.z > o.min.z - 1 && p.z < o.max.z + 1 && p.y < o.max.y + 1) crash = true;
+    }
+    if (crash && state.invuln <= 0) {
+      state.fuel -= CRASH_COST; state.invuln = 1.5; state.flash = 0.4; state.combo = 0;
+      popup(`CRASH  fuel −${CRASH_COST} s`, '#ff6b6b', 240);
+    }
+    state.fuel -= dt;
+    if (state.fuel <= 0 && !state.over) { state.fuel = 0; state.over = 'fuel'; }
+    updateCamera();
+  }
+
+  // ---------- Drawing ----------
+  let clippedSegs = [], clippedOn = false, drawList = [];
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function line2(a, b, color, lw = 1.5) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  function line3(A, B, color, lw = 1.5) {        // world-space segment
+    const s = segment(toView(A), toView(B));
+    if (s) line2(s[0], s[1], color, lw);
+  }
+  const fade = z => clamp(1 - z / FAR, 0.08, 1);
+
+  function drawGrid() {
+    const x0 = Math.floor((cam.pos.x - GRID_REACH) / GRID) * GRID, z0 = Math.floor((cam.pos.z - GRID_REACH) / GRID) * GRID;
+    const n = Math.round(2 * GRID_REACH / GRID);
+    for (let i = 0; i <= n; i++) for (let j = 0; j < n; j += 3) {
+      const x = x0 + i * GRID, z = z0 + j * GRID, z2 = z0 + Math.min(j + 3, n) * GRID;
+      const a = V3(x, 0, z), b = V3(x, 0, z2);
+      const depth = dot3(sub3(lerp3(a, b, 0.5), cam.pos), cam.f);
+      line3(a, b, `rgba(70,140,200,${0.55 * fade(depth)})`, 1);
+    }
+    for (let j = 0; j <= n; j++) for (let i = 0; i < n; i += 3) {
+      const z = z0 + j * GRID, x = x0 + i * GRID, x2 = x0 + Math.min(i + 3, n) * GRID;
+      const a = V3(x, 0, z), b = V3(x2, 0, z);
+      const depth = dot3(sub3(lerp3(a, b, 0.5), cam.pos), cam.f);
+      line3(a, b, `rgba(70,140,200,${0.55 * fade(depth)})`, 1);
+    }
+  }
+
+  function drawObject(o, v) {
+    const a = fade(v.z);
+    if (o.type === 'ring') {
+      const col = o.state === 'passed' ? `rgba(95,209,139,${0.5 * a})` : o.state === 'missed' ? `rgba(255,107,107,${0.5 * a})`
+        : o.index === state.next ? `rgba(255,213,107,${a})` : `rgba(108,220,255,${0.85 * a})`;
+      const lw = o.index === state.next ? 3 : 2, N = 24;
+      let prev = null;
+      for (let k = 0; k <= N; k++) {
+        const t = k / N * Math.PI * 2;
+        const p = add3(o.c, add3(mul3(o.side, Math.cos(t) * o.r), V3(0, Math.sin(t) * o.r, 0)));
+        if (prev) line3(prev, p, col, lw);
+        prev = p;
+      }
+      return;
+    }
+    // Filled faces: only those that face the camera, n̂ · (camera − point) > 0
+    for (const face of o.faces) {
+      if (dot3(face.n, sub3(cam.pos, face.pts[0])) <= 0) continue;
+      stats.faces++;
+      const vp = clipPoly(face.pts.map(toView));
+      if (vp.length < 3) continue;
+      const sp = vp.map(project);
+      ctx.beginPath(); sp.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath();
+      const light = 0.35 + 0.65 * Math.max(0, dot3(face.n, norm3(V3(0.4, 0.8, -0.45))));   // Lambert (Chapter 12)
+      ctx.fillStyle = o.type === 'pillar' ? `rgb(${f0(18 + 30 * light)},${f0(22 + 26 * light)},${f0(34 + 40 * light)})`
+        : `rgb(${f0(14 + 18 * light)},${f0(18 + 22 * light)},${f0(24 + 26 * light)})`;
+      ctx.fill();
+      ctx.strokeStyle = o.type === 'pillar' ? `rgba(255,140,100,${a})` : `rgba(150,120,255,${0.8 * a})`;
+      ctx.lineWidth = 1.5; ctx.stroke();
+    }
+  }
+
+  function drawShip() {
+    const b = basis(ship.yaw, ship.pitch, ship.roll), p = ship.pos;
+    const w = (x, y, z) => add3(p, add3(add3(mul3(b.r, x), mul3(b.u, y)), mul3(b.f, z)));
+    const N = w(0, 0, 3), L = w(-3, 0, -1.5), R = w(3, 0, -1.5), T = w(0, 0.9, -1.2), B = w(0, -0.3, -1.5);
+    const col = state.invuln > 0 && Math.floor(state.time * 12) % 2 ? '#ff6b6b' : '#e6e9ef';
+    for (const [a, c] of [[N, L], [N, R], [L, B], [R, B], [N, T], [L, T], [R, T], [T, B]]) line3(a, c, col, 2);
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * OX, DPR * OY);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
+    ctx.fillStyle = '#080a10'; ctx.fillRect(0, 0, VW, VH);
+    stats = { segs: 0, clipped: 0, dropped: 0, objects: 0, culled: 0, faces: 0 };
+    clippedSegs = []; clippedOn = LENSES[2].on;
+
+    // horizon: two very distant points on the ground plane
+    const hf = norm3(V3(cam.f.x, 0, cam.f.z)), hr = V3(hf.z, 0, -hf.x);
+    line3(add3(V3(cam.pos.x, 0, cam.pos.z), mul3(add3(hf, mul3(hr, -1.5)), 20000)),
+      add3(V3(cam.pos.x, 0, cam.pos.z), mul3(add3(hf, mul3(hr, 1.5)), 20000)), 'rgba(123,92,196,.6)', 1.5);
+    drawGrid();
+
+    // Objects: cull, then sort far → near (painter's algorithm), then draw
+    drawList = [];
+    for (const o of objects) {
+      stats.objects++;
+      const v = toView(o.c);
+      o.v = v;
+      if (settings.cull && !inFrustum(v, o.r)) { stats.culled++; o.visible = false; continue; }
+      o.visible = true;
+      drawList.push(o);
+    }
+    if (settings.sort) drawList.sort((a, b) => b.v.z - a.v.z);
+    for (const o of drawList) drawObject(o, o.v);
+    drawShip();
+
+    for (const l of LENSES) if (l.on && l.draw) l.draw();
+    drawMarker();
+
+    // Scope
+    if (ship.fov < 35) {
+      ctx.strokeStyle = 'rgba(108,184,255,.6)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(CX, CY, 250, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.arc(CX, CY, 250, 0, Math.PI * 2, true); ctx.fill();
+    }
+    line2(V(CX - 8, CY), V(CX + 8, CY), 'rgba(230,233,239,.5)', 1); line2(V(CX, CY - 8), V(CX, CY + 8), 'rgba(230,233,239,.5)', 1);
+
+    // HUD
+    const fw = 200 * clamp(state.fuel / 30, 0, 1);
+    ctx.fillStyle = 'rgba(10,12,16,.85)'; ctx.fillRect(13, 13, 202, 12);
+    ctx.fillStyle = state.fuel > 6 ? '#5fd18b' : '#ff6b6b'; ctx.fillRect(14, 14, fw, 10);
+    text(`fuel ${f1(state.fuel)} s`, 224, 24, '#e6e9ef', 13);
+    text(`ring ${Math.min(state.next + 1, RINGS)}/${RINGS}   passed ${state.passed}   combo ×${state.combo}   score ${state.score}`, 14, 44, '#9aa3b2', 13);
+    text(`speed ${f0(ship.speed)} m/s   altitude ${f0(ship.pos.y)} m   FOV ${f0(ship.fov)}°`, 14, 62, '#9aa3b2', 13);
+    for (const p of popups) { ctx.globalAlpha = clamp(p.life, 0, 1); text(p.text, CX, p.y, p.color, 16, 'center'); ctx.globalAlpha = 1; }
+    if (state.flash > 0) { ctx.fillStyle = `rgba(255,60,60,${state.flash * 0.6})`; ctx.fillRect(0, 0, VW, VH); }
+
+    if (!started) overlay('WIREFRAME FLYER', ['Fly through 40 rings. Each ring adds 5 s of fuel.',
+      'W / S climb and dive · A / D turn · Space boost · hold Z to zoom', 'Press any key to start']);
+    else if (state.over === 'fuel') overlay('OUT OF FUEL', [`${state.passed} of ${RINGS} rings · score ${state.score}`, 'Press R or click to try again']);
+    else if (state.over === 'finish') overlay('COURSE COMPLETE', [`${state.passed} of ${RINGS} rings · score ${state.score} · ${state.time.toFixed(1)} s`, 'Press R or click to fly again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+    ctx.restore();
+  }
+
+  // HUD marker above the next ring: world → screen, or an edge arrow if it is off screen or behind
+  function markerInfo() {
+    const ring = rings[state.next]; if (!ring) return null;
+    const top = add3(ring.c, V3(0, ring.r + 2.5, 0)), v = toView(top);
+    const distM = len3(sub3(ring.c, ship.pos));
+    const front = v.z > settings.near;
+    const s = front ? project(v) : null;
+    const on = front && s.x > 10 && s.x < VW - 10 && s.y > 10 && s.y < VH - 10;
+    return { ring, top, v, s, on, distM };
+  }
+  function drawMarker() {
+    const m = markerInfo(); if (!m || state.over) return;
+    const label = `RING ${m.ring.index + 1} · ${f0(m.distM)} m`;
+    if (m.on) {
+      text('▼', m.s.x, m.s.y - 2, '#ffd56b', 14, 'center');
+      text(label, m.s.x, m.s.y - 18, '#ffd56b', 12, 'center');
+    } else {
+      // direction on screen from the view-space x and y (no divide, so it works behind you too)
+      let dx = m.v.x, dy = -m.v.y;
+      if (Math.hypot(dx, dy) < 1e-6) { dx = 0; dy = 1; }
+      const t = Math.min((CX - 30) / Math.max(Math.abs(dx), 1e-6), (CY - 30) / Math.max(Math.abs(dy), 1e-6));
+      const p = V(CX + dx * t, CY + dy * t), a = Math.atan2(dy, dx);
+      ctx.fillStyle = '#ffd56b'; ctx.beginPath();
+      ctx.moveTo(p.x + Math.cos(a) * 12, p.y + Math.sin(a) * 12);
+      ctx.lineTo(p.x + Math.cos(a + 2.4) * 9, p.y + Math.sin(a + 2.4) * 9);
+      ctx.lineTo(p.x + Math.cos(a - 2.4) * 9, p.y + Math.sin(a - 2.4) * 9); ctx.fill();
+      text(label, clamp(p.x - Math.cos(a) * 20, 70, VW - 70), clamp(p.y - Math.sin(a) * 20 + 4, 20, VH - 10), '#ffd56b', 12, 'center');
+    }
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, VW, VH);
+    text(title, CX, CY - 30, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, CX, CY + 2 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'Perspective divide', chap: 'Chapter 17.2–17.5',
+      formula: 'view:  x = d·r̂,  y = d·û,  z = d·f̂\n       (d = P − camera)\nx′ = f·x ÷ z,   y′ = f·y ÷ z\nscreen = (480 + x′, 300 − y′)\nNDC = (x′ ÷ 480, y′ ÷ 300)',
+      used: ['Every 3D camera in every 3D game', 'Things shrinking with distance; parallax',
+        'Placing 2D sprites in a 3D scene (billboards)', 'Orthographic views: strategy maps, isometric games, CAD'],
+      tryThis: 'Untick "Perspective divide": the world turns orthographic. Rings no longer shrink with distance, and the ground stops meeting at a horizon.',
+      controls: `<label><input type="checkbox" data-set="divide"> Perspective divide (÷ z)</label>`,
+      draw() {
+        const m = markerInfo(); if (!m) return;
+        const v = toView(m.ring.c);
+        if (v.z <= settings.near) return;
+        const s = project(v);
+        line2(V(CX, CY), s, 'rgba(108,184,255,.6)', 1.5);
+        ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, Math.PI * 2); ctx.stroke();
+        text(`z = ${f1(v.z)} m`, s.x + 10, s.y + 16, '#6cb8ff', 12);
+        text(`(${f0(s.x)}, ${f0(s.y)}) px`, s.x + 10, s.y + 30, '#6cb8ff', 12);
+      },
+      live() {
+        const r = rings[state.next]; if (!r) return 'course complete';
+        const v = toView(r.c);
+        if (v.z <= 0) return `next ring center\n world ${P3(r.c)}\n view  ${P3(v)}\n z ≤ 0: it is BEHIND the camera`;
+        const xp = settings.divide ? cam.F * v.x / v.z : cam.F / ORTHO_REF * v.x;
+        const yp = settings.divide ? cam.F * v.y / v.z : cam.F / ORTHO_REF * v.y;
+        return `next ring center\n world  ${P3(r.c)}\n camera ${P3(cam.pos)}\n view   ${P3(v)}\n f = ${f1(cam.F)} px\n x′ = ${settings.divide ? 'f·x/z' : 'f·x/60'} = ${f1(xp)}\n y′ = ${settings.divide ? 'f·y/z' : 'f·y/60'} = ${f1(yp)}\n screen (${f1(CX + xp)}, ${f1(CY - yp)})\n NDC    (${f2(xp / CX)}, ${f2(yp / CY)})\n on screen? ${Math.abs(xp / CX) <= 1 && Math.abs(yp / CY) <= 1 ? 'yes' : 'no'}`;
+      },
+    },
+    {
+      name: 'Field of view', chap: 'Chapter 17.4',
+      formula: 'f = (H/2) ÷ tan(FOV/2) = 300 ÷ tan(FOV/2)\nhorizontal FOV = 2·atan(1.6·tan(FOV/2))\nscope: hold Z → FOV 20°',
+      used: ['Sniper scopes and binoculars', 'Speed effects: widening the FOV when boosting',
+        'Player FOV settings in shooters', 'Cutscene zooms and dolly zooms'],
+      tryThis: 'Hold Z: the FOV drops to 20° and f triples, so distant rings jump closer. Drag the FOV slider to 110° for a fish-eye look.',
+      controls: `<label>FOV <input type="range" min="30" max="110" step="5" data-set="fov"> <span data-show="fov"></span>°</label>`,
+      live() {
+        const fov = ship.fov, F = cam.F, h = 2 * deg(Math.atan(ASPECT * Math.tan(fov * RAD / 2)));
+        const r = rings[state.next];
+        let extra = '';
+        if (r) { const v = toView(r.c); if (v.z > 0) extra = `\nnext ring: radius 7 m at z = ${f0(v.z)} m\n  → ${f1(F * RING_R / v.z)} px on screen`; }
+        return `vertical FOV   ${f1(fov)}°\nf = 300 ÷ tan(${f1(fov / 2)}°) = ${f1(F)} px\nhorizontal FOV ${f1(h)}°\nmagnification vs 60°: ×${f2(F / (300 / Math.tan(30 * RAD)))}${extra}`;
+      },
+    },
+    {
+      name: 'Near plane', chap: 'Chapter 17.6',
+      formula: 'segment A→B crossing z = near:\nt = (near − A.z) ÷ (B.z − A.z)\nP = A + t (B − A)\nkeep the part with z ≥ near',
+      used: ['Every 3D renderer clips triangles', 'Camera close to walls: the near plane cuts them',
+        'Ground grids and roads that pass under the camera', 'Shadow and reflection cameras'],
+      tryThis: 'Untick "Clip at near plane": grid lines that pass under you now explode across the screen. Then raise the near distance to 15 m and watch the plane slice your own ship.',
+      controls: `<label><input type="checkbox" data-set="clip"> Clip at near plane</label>
+        <label>near <input type="range" min="0.5" max="15" step="0.5" data-set="near"> <span data-show="near"></span> m</label>`,
+      draw() {
+        for (const [a, b] of clippedSegs) {
+          line2(a, b, 'rgba(255,181,71,.9)', 2);
+          ctx.fillStyle = '#ffb547'; ctx.fillRect(b.x - 2, b.y - 2, 4, 4);
+        }
+      },
+      live() {
+        return `near plane     z = ${settings.near} m\nsegments       ${stats.segs}\n  clipped      ${stats.clipped}  (orange)\n  dropped      ${stats.dropped}  (fully behind or beyond far)\nclipping       ${settings.clip ? 'ON' : 'OFF (bug)'}`;
+      },
+    },
+    {
+      name: 'Frustum culling', chap: 'Chapter 17.7',
+      formula: 'sphere (c, r) in view space is visible if\n  c.z + r ≥ near  and  c.z − r ≤ 900\n  and  n̂·c ≥ −r  for all 4 side planes',
+      used: ['Skipping off-screen objects in every 3D game', 'Deciding which enemies to animate or update',
+        'Streaming open worlds', 'Spatial partitioning (Chapter 23) culls whole groups'],
+      tryThis: 'Watch the inset: gray dots are culled. Turn hard and see objects enter and leave the wedge. Untick "Frustum culling" and compare the face counts.',
+      controls: `<label><input type="checkbox" data-set="cull"> Frustum culling</label>`,
+      draw() {
+        const ox = 120, oy = VH - 16, k = 150 / FAR;
+        ctx.fillStyle = 'rgba(10,12,16,.85)'; ctx.fillRect(ox - 110, oy - 160, 220, 166);
+        const hx = cam.tanH * FAR * k;
+        ctx.fillStyle = 'rgba(108,184,255,.12)'; ctx.beginPath(); ctx.moveTo(ox, oy);
+        ctx.lineTo(ox - Math.min(hx, 300), oy - 150); ctx.lineTo(ox + Math.min(hx, 300), oy - 150); ctx.closePath(); ctx.fill();
+        ctx.save(); ctx.beginPath(); ctx.rect(ox - 110, oy - 160, 220, 166); ctx.clip();
+        for (const o of objects) {
+          if (!o.v || o.v.z < -80 || o.v.z > FAR + 100) continue;
+          const p = V(ox + o.v.x * k, oy - o.v.z * k);
+          ctx.fillStyle = o.visible ? (o.type === 'ring' ? '#ffd56b' : o.type === 'pillar' ? '#ff8c64' : '#9678ff') : '#4a5162';
+          ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+        }
+        ctx.restore();
+        text('top view of the frustum', ox - 104, oy - 146, '#9aa3b2', 11);
+      },
+      live() {
+        return `objects        ${stats.objects}\n culled        ${stats.culled}\n drawn         ${stats.objects - stats.culled}\nfaces projected ${stats.faces}\nhalf-angles    ${f1(ship.fov / 2)}° up/down, ${f1(deg(Math.atan(cam.tanH)))}° left/right\nculling        ${settings.cull ? 'ON' : 'OFF'}`;
+      },
+    },
+    {
+      name: 'Depth & labels', chap: 'Chapter 17.8–17.9',
+      formula: "painter's algorithm: sort by view z,\n  draw far → near\nlabel = project(ring top + (0, 2.5, 0))\nbehind (z < near) → arrow on the edge",
+      used: ['Sorting sprites and transparent objects', 'Health bars and names above 3D heads',
+        'Objective markers and waypoint arrows', 'Isometric games: draw back rows first'],
+      tryThis: 'Untick "Sort by depth": objects are drawn in list order, and the far mountains are painted over nearer pillars and rings.',
+      controls: `<label><input type="checkbox" data-set="sort"> Sort by depth (far → near)</label>`,
+      draw() {
+        drawList.forEach((o, i) => {
+          if (o.type === 'mountain' || o.v.z <= settings.near) return;
+          if (o.v.z > 450) return;
+          const s = project(o.v);
+          text(`#${i + 1} z=${f0(o.v.z)}`, s.x, s.y, '#e6e9ef', 11, 'center');
+        });
+      },
+      live() {
+        const list = drawList.slice(-6).map(o => ` ${o.type.padEnd(8)} z = ${f0(o.v.z)}`).join('\n');
+        return `draw order (last 6 drawn):\n${list}\nsorting ${settings.sort ? 'ON (far → near)' : 'OFF (list order)'}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Fly a round first. Then press 1–5 to see how 3D points become pixels.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected && stats) liveEl.textContent = selected.live(); }
+
+  reset();
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    else updateCamera();
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

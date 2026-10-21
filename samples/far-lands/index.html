@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Far Lands</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #171b23;
+    --panel-2: #1f2430;
+    --line: #2a3140;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #6cb8ff;
+    --warn: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #panel { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .lenses { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 14px; }
+  .lens { display: flex; align-items: center; gap: 6px; text-align: left; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 12.5px; cursor: pointer; }
+  .lens kbd { font: 11px Menlo, Consolas, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; }
+  .lens.on { border-color: var(--accent); background: #1d2b3d; }
+  .lens.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .chap { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid #2d4766;
+    border-radius: 999px; padding: 1px 8px; margin-bottom: 8px; }
+  .formula { font: 13px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin: 6px 0 10px; white-space: pre-wrap; color: #cfe6ff; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 4px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 2px 0; }
+  .try { color: var(--warn); }
+  .live { font: 12.5px Menlo, Consolas, monospace; background: #11151c; border-radius: 6px;
+    padding: 8px; margin-top: 6px; white-space: pre; overflow-x: auto; min-height: 3em; }
+  .controls { margin-top: 8px; display: grid; gap: 6px; }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { flex: 1; }
+  .help { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+  .help b { color: var(--text); }
+  @media (max-width: 820px) {
+    #app { flex-direction: column; height: auto; }
+    #stage { flex: none; height: 62vh; }
+    #panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="game"></canvas></div>
+  <aside id="panel">
+    <h1>Far Lands</h1>
+    <p class="sub">Fly farther and farther from home to collect beacons. Far from the origin, the numbers that store your position start to run out of digits.</p>
+    <div class="lenses" id="lenses"></div>
+    <div class="card" id="card"></div>
+    <div class="help">
+      <b>Fly</b> WASD / arrows · <b>Lenses</b> keys 1–5 · <b>Restart</b> R · <b>Pause</b> P
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- Helpers ----------
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const f0 = n => Math.round(n).toString();
+  const f2 = n => (Math.abs(n) < 0.005 ? 0 : n).toFixed(2);
+  const fmt = (n, d = 2) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const mod = (a, n) => ((a % n) + n) % n;
+
+  const settings = {
+    f32: true,        // store every position as a 32-bit float (Math.fround)
+    rebase: true,     // floating origin: keep stored positions small
+    tolerance: true,  // compare the jump charge with a tolerance, not ==
+  };
+
+  // ---------- Game constants (the chapter quotes these) ----------
+  const VIEW = { w: 160, h: 100 };          // world units visible
+  const SECTORS = [
+    { name: 'Home', d: 0 },
+    { name: 'Outer Dock', d: 1000 },
+    { name: 'The Belt', d: 30000 },
+    { name: 'Deep Field', d: 500000 },
+    { name: 'The Drift', d: 3000000 },
+    { name: 'The Edge', d: 12000000 },
+    { name: 'Far Lands', d: 40000000 },
+  ];
+  const BOX = 150;              // each sector is 300 × 300 units
+  const BEACONS_PER = 3;
+  const ACCEL = 70;             // units/s²
+  const MAX_SPEED = 45;         // units/s
+  const DRAG = 0.8;
+  const SHIP_R = 2.5, BEACON_R = 3;
+  const REBASE_DIST = 100;      // rebase when the ship is this far from the local origin
+  const TICK = 0.15, STEP = 0.1, EPS = 1e-9, MISFIRE = 1.25;
+  const CAM_K = 5;
+
+  // Every stored position goes through this
+  const store = v => settings.f32 ? Math.fround(v) : v;
+
+  // ---------- Float inspection ----------
+  const dv = new DataView(new ArrayBuffer(8));
+  function exponentOf(a) {
+    let e = Math.floor(Math.log2(a));
+    if (Math.pow(2, e) > a) e--; else if (Math.pow(2, e + 1) <= a) e++;
+    return e;
+  }
+  function gapAt(x, f32) {
+    const a = Math.abs(x), mant = f32 ? 23 : 52, emin = f32 ? -126 : -1022;
+    if (a === 0) return Math.pow(2, emin - mant);
+    return Math.pow(2, Math.max(exponentOf(a), emin) - mant);
+  }
+  function floatParts(x, f32) {
+    let bits;
+    if (f32) { dv.setFloat32(0, x); bits = dv.getUint32(0).toString(2).padStart(32, '0'); }
+    else { dv.setFloat64(0, x); bits = dv.getUint32(0).toString(2).padStart(32, '0') + dv.getUint32(4).toString(2).padStart(32, '0'); }
+    const ne = f32 ? 8 : 11, bias = f32 ? 127 : 1023;
+    const sign = bits[0], exp = bits.slice(1, 1 + ne), man = bits.slice(1 + ne);
+    const ev = parseInt(exp, 2);
+    return { sign, exp, man, ev, e: ev === 0 ? 1 - bias : ev - bias, lead: ev === 0 ? '0' : '1', bias };
+  }
+  function sci(x) {
+    if (x === 0) return '0';
+    const [m, e] = x.toExponential(8).split('e');
+    return `${m} × 10^${parseInt(e, 10)}`;
+  }
+  function gapStr(g) {
+    if (g >= 0.01) return String(g);
+    return g.toExponential(2).replace('e', ' × 10^').replace('^-', '^−').replace('^+', '^');
+  }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = 800, H = 600, DPR = 1, S = 1, OX = 0, OY = 0;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    S = Math.min(W / VIEW.w, H / VIEW.h);       // scale to fit (Chapter 3)
+    OX = W / 2; OY = H / 2;                     // the camera sits at the center
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---------- Input ----------
+  const keys = {};
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (/^[1-5]$/.test(k)) { toggleLens(LENSES[+k - 1]); return; }
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+    if (!started) started = true;
+    if (k === 'r') reset();
+    if (k === 'p') paused = !paused;
+    keys[k] = true;
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  canvas.addEventListener('pointerdown', () => { started = true; if (state.over) reset(); });
+
+  // ---------- State ----------
+  let state, origin, ship, cam, ref, asteroids, beacons, popups, stars;
+  let started = false, paused = false;
+
+  function makeStars() {
+    stars = [0.15, 0.35, 0.6].map(f => ({ f, pts: Array.from({ length: 60 }, () => [rand(0, 512), rand(0, 512), rand(0.6, 1.6)]) }));
+  }
+  makeStars();
+
+  function reset() {
+    state = { over: null, time: 0, score: 0, sector: 0, got: 0, total: 0, spooling: false, charge: 0, tickT: 0,
+      misfires: 0, warp: 0, rebases: 0, clock32: 0, clock64: 0, lastStep: 0 };
+    popups = [];
+    enterSector(0, 3);
+  }
+
+  const center = () => ({ x: SECTORS[state.sector].d, y: 0 });
+  const absX = o => origin.x + o.x;
+  const absY = o => origin.y + o.y;
+
+  // Place an object given its exact world position
+  function place(o, wx, wy) { o.x = store(wx - origin.x); o.y = store(wy - origin.y); }
+
+  function enterSector(k, hull) {
+    state.sector = k; state.got = 0; state.spooling = false; state.charge = 0;
+    const C = center();
+    origin = settings.rebase ? { x: C.x, y: C.y } : { x: 0, y: 0 };
+    ship = { x: 0, y: 0, vx: 0, vy: 0, ang: 0, hull: hull ?? ship.hull, inv: 1, thrust: false };
+    place(ship, C.x - 110, C.y);
+    cam = { x: ship.x, y: ship.y };
+    ref = { x: absX(ship), y: absY(ship) };
+    beacons = [];
+    while (beacons.length < BEACONS_PER) {
+      const ox = rand(-125, 125), oy = rand(-125, 125);
+      if (Math.hypot(ox + 110, oy) < 55) continue;
+      if (beacons.some(b => Math.hypot(b.ox - ox, b.oy - oy) < 40)) continue;
+      const b = { ox, oy, t: rand(0, 6) }; place(b, C.x + ox, C.y + oy); beacons.push(b);
+    }
+    asteroids = [];
+    const n = 3 + 2 * k;
+    while (asteroids.length < n) {
+      const ox = rand(-BOX, BOX), oy = rand(-BOX, BOX);
+      if (Math.hypot(ox + 110, oy) < 45) continue;
+      const a = { r: rand(3, 7.5), spin: rand(-1.5, 1.5), rot: rand(0, 6.28), shape: [] };
+      for (let i = 0; i < 9; i++) a.shape.push(rand(0.75, 1.15));
+      const sp = rand(5, 10 + 2 * k), th = rand(0, Math.PI * 2);
+      a.vx = Math.cos(th) * sp; a.vy = Math.sin(th) * sp;
+      place(a, C.x + ox, C.y + oy); asteroids.push(a);
+    }
+  }
+  reset();
+
+  function popup(text, color, x, y) { popups.push({ text, color, x, y, life: 1.6 }); }
+  const allObjects = () => [ship, cam, ...asteroids, ...beacons];
+
+  // Floating origin: move the origin to the ship, keep everything's world position
+  function rebase() {
+    const sx = Math.round(ship.x), sy = Math.round(ship.y);
+    origin.x += sx; origin.y += sy;
+    for (const o of allObjects()) { o.x = store(o.x - sx); o.y = store(o.y - sy); }
+    state.rebases++;
+  }
+
+  function applySetting(key) {
+    if (key === 'f32' && settings.f32) for (const o of allObjects()) { o.x = store(o.x); o.y = store(o.y); }
+    if (key === 'rebase') {
+      if (settings.rebase) {
+        const sx = Math.round(ship.x), sy = Math.round(ship.y);
+        origin = { x: origin.x + sx, y: origin.y + sy };
+        for (const o of allObjects()) { o.x = store(o.x - sx); o.y = store(o.y - sy); }
+      } else {
+        for (const o of allObjects()) { o.x = store(origin.x + o.x); o.y = store(origin.y + o.y); }
+        origin = { x: 0, y: 0 };
+      }
+    }
+  }
+
+  // The jump drive: +0.1 per tick, fires when the charge reaches 1
+  function chargeTick() {
+    state.charge += STEP;
+    const full = settings.tolerance ? Math.abs(state.charge - 1) < EPS : state.charge === 1;
+    if (full) {
+      state.spooling = false; state.warp = 1;
+      return true;
+    }
+    if (state.charge > MISFIRE) {
+      state.misfires++;
+      popup(`MISFIRE: charge passed 1 without ever equaling 1`, '#ff6b6b', W / 2, H - 70);
+      state.charge = 0;
+    }
+    return false;
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    for (const p of popups) { p.life -= dt; p.y -= 18 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (state.over) return;
+    state.time += dt;
+    state.clock64 += dt;
+    state.clock32 = Math.fround(state.clock32 + Math.fround(dt));
+
+    if (state.warp > 0) {
+      const before = state.warp;
+      state.warp -= dt;
+      if (before > 0.5 && state.warp <= 0.5) { enterSector(state.sector + 1); popup(`SECTOR ${state.sector + 1}: ${SECTORS[state.sector].name}`, '#6cb8ff', W / 2, H / 2 - 60); }
+      return;
+    }
+
+    // Thrust
+    let ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+    let iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+    const il = Math.hypot(ix, iy);
+    if (il > 0) { ix /= il; iy /= il; }
+    ship.thrust = il > 0;
+    ship.vx += ix * ACCEL * dt; ship.vy += iy * ACCEL * dt;
+    const C = center();
+    const lx = absX(ship) - C.x, ly = absY(ship) - C.y;
+    if (Math.abs(lx) > BOX) ship.vx -= Math.sign(lx) * 150 * dt;
+    if (Math.abs(ly) > BOX) ship.vy -= Math.sign(ly) * 150 * dt;
+    const sp = Math.hypot(ship.vx, ship.vy);
+    if (sp > MAX_SPEED) { ship.vx *= MAX_SPEED / sp; ship.vy *= MAX_SPEED / sp; }
+    const drag = Math.exp(-DRAG * dt);
+    ship.vx *= drag; ship.vy *= drag;
+    if (sp > 1) ship.ang = Math.atan2(ship.vy, ship.vx);
+
+    // Move: every store is rounded to the chosen precision
+    state.lastStep = Math.hypot(ship.vx, ship.vy) * dt;
+    ship.x = store(ship.x + ship.vx * dt);
+    ship.y = store(ship.y + ship.vy * dt);
+    ref.x += ship.vx * dt; ref.y += ship.vy * dt;       // exact (64-bit) reference
+    ship.inv -= dt;
+
+    for (const a of asteroids) {
+      a.x = store(a.x + a.vx * dt); a.y = store(a.y + a.vy * dt);
+      a.rot += a.spin * dt;
+      const ax = absX(a) - C.x, ay = absY(a) - C.y;
+      if (Math.abs(ax) > BOX && Math.sign(ax) === Math.sign(a.vx)) a.vx = -a.vx;
+      if (Math.abs(ay) > BOX && Math.sign(ay) === Math.sign(a.vy)) a.vy = -a.vy;
+    }
+
+    const k = 1 - Math.exp(-CAM_K * dt);
+    cam.x = store(cam.x + (ship.x - cam.x) * k);
+    cam.y = store(cam.y + (ship.y - cam.y) * k);
+
+    if (settings.rebase && Math.hypot(ship.x, ship.y) > REBASE_DIST) rebase();
+
+    // Collisions use the stored positions
+    for (const a of asteroids) {
+      const dx = ship.x - a.x, dy = ship.y - a.y, d = Math.hypot(dx, dy);
+      if (d < SHIP_R + a.r && ship.inv <= 0) {
+        ship.hull--; ship.inv = 1.5;
+        const n = d > 0 ? 1 / d : 0;
+        ship.vx = dx * n * 35; ship.vy = dy * n * 35;
+        popup('HULL HIT', '#ff6b6b', OX, OY - 40);
+        if (ship.hull <= 0) { state.over = 'lost'; return; }
+      }
+    }
+    for (const b of beacons) {
+      if (b.taken) continue;
+      b.t += dt;
+      if (Math.hypot(ship.x - b.x, ship.y - b.y) < SHIP_R + BEACON_R) {
+        b.taken = true; state.got++; state.total++; state.score += 100;
+        popup('+100 beacon', '#5fd18b', OX, OY - 40);
+        if (state.got === BEACONS_PER) {
+          if (state.sector === SECTORS.length - 1) {
+            state.score += ship.hull * 200;
+            state.over = 'won'; return;
+          }
+          state.spooling = true; state.charge = 0; state.tickT = TICK;
+          popup('JUMP DRIVE SPOOLING', '#6cb8ff', OX, OY - 60);
+        }
+      }
+    }
+    if (state.spooling) {
+      state.tickT -= dt;
+      while (state.tickT <= 0 && state.spooling) { state.tickT += TICK; chargeTick(); }
+    }
+  }
+
+  // ---------- Drawing ----------
+  const sx = o => (o.x - cam.x) * S + OX;   // stored coordinates → screen
+  const sy = o => (o.y - cam.y) * S + OY;
+
+  function text(t, x, y, color = '#e6e9ef', size = 12, align = 'left') {
+    ctx.font = `${size}px Menlo, Consolas, monospace`;
+    ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(10,12,16,.9)'; ctx.strokeText(t, x, y);
+    ctx.fillStyle = color; ctx.fillText(t, x, y);
+  }
+  function circle(x, y, r, fill, stroke, lw = 2) {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+  }
+  function line(x1, y1, x2, y2, color, lw = 1.5) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#070910'; ctx.fillRect(0, 0, W, H);
+
+    // Parallax stars (they also shake when the camera's position is coarse)
+    const cx = origin.x + cam.x, cy = origin.y + cam.y;
+    for (const L of stars) {
+      const offX = mod(cx * L.f * S, 512), offY = mod(cy * L.f * S, 512);
+      ctx.fillStyle = `rgba(200,215,255,${0.25 + L.f})`;
+      for (const [px, py, r] of L.pts) {
+        for (let x = mod(px - offX, 512) - 512; x < W + 512; x += 512) {
+          for (let y = mod(py - offY, 512) - 512; y < H + 512; y += 512) {
+            if (x >= 0 && x <= W && y >= 0 && y <= H) ctx.fillRect(x, y, r, r);
+          }
+        }
+      }
+    }
+
+    // Sector boundary
+    const C = center();
+    const bx = (C.x - BOX - origin.x - cam.x) * S + OX, by = (C.y - BOX - origin.y - cam.y) * S + OY;
+    ctx.setLineDash([6, 8]); ctx.strokeStyle = 'rgba(108,184,255,.25)'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx, by, 2 * BOX * S, 2 * BOX * S); ctx.setLineDash([]);
+
+    // Beacons
+    for (const b of beacons) {
+      if (b.taken) continue;
+      const x = sx(b), y = sy(b), pulse = 1 + 0.15 * Math.sin(b.t * 4);
+      circle(x, y, BEACON_R * S * pulse, 'rgba(95,209,139,.18)', '#5fd18b', 2.5);
+      circle(x, y, BEACON_R * S * 0.35, '#5fd18b');
+    }
+
+    // Asteroids
+    for (const a of asteroids) {
+      const x = sx(a), y = sy(a);
+      ctx.beginPath();
+      a.shape.forEach((m, i) => {
+        const t = a.rot + i / a.shape.length * Math.PI * 2;
+        const px = x + Math.cos(t) * a.r * m * S, py = y + Math.sin(t) * a.r * m * S;
+        i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      });
+      ctx.closePath(); ctx.fillStyle = '#3a3f4b'; ctx.fill();
+      ctx.strokeStyle = '#7d8597'; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    // Ship
+    const shx = sx(ship), shy = sy(ship);
+    const blink = ship.inv > 0 && Math.floor(ship.inv * 10) % 2 === 0;
+    if (!blink && state.warp <= 0) {
+      ctx.save(); ctx.translate(shx, shy); ctx.rotate(ship.ang); ctx.scale(S, S);
+      if (ship.thrust) {
+        ctx.fillStyle = '#ffb547';
+        ctx.beginPath(); ctx.moveTo(-2.2, -0.9); ctx.lineTo(-4.2 - Math.random() * 1.5, 0); ctx.lineTo(-2.2, 0.9); ctx.fill();
+      }
+      ctx.fillStyle = '#2a5d8f'; ctx.strokeStyle = '#6cb8ff'; ctx.lineWidth = 0.45;
+      ctx.beginPath(); ctx.moveTo(3.2, 0); ctx.lineTo(-2.4, -2.1); ctx.lineTo(-1.5, 0); ctx.lineTo(-2.4, 2.1); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+
+    // Arrows at the screen edge toward beacons you cannot see
+    for (const b of beacons) {
+      if (b.taken) continue;
+      const x = sx(b), y = sy(b);
+      if (x > 20 && x < W - 20 && y > 20 && y < H - 20) continue;
+      const ang = Math.atan2(y - OY, x - OX);
+      const ex = clamp(x, 24, W - 24), ey = clamp(y, 40, H - 24);
+      ctx.save(); ctx.translate(ex, ey); ctx.rotate(ang);
+      ctx.fillStyle = '#5fd18b'; ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(-6, -7); ctx.lineTo(-6, 7); ctx.fill();
+      ctx.restore();
+    }
+
+    for (const l of LENSES) if (l.on) l.draw();
+
+    for (const p of popups) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      text(p.text, p.x, p.y, p.color, 14, 'center');
+      ctx.globalAlpha = 1;
+    }
+
+    // Warp flash
+    if (state.warp > 0) {
+      const a = 1 - Math.abs(state.warp - 0.5) * 2;
+      ctx.fillStyle = `rgba(108,184,255,${a * 0.85})`; ctx.fillRect(0, 0, W, H);
+      ctx.strokeStyle = `rgba(230,240,255,${a})`; ctx.lineWidth = 2;
+      for (let i = 0; i < 40; i++) {
+        const t = i / 40 * Math.PI * 2, r1 = 40 + (i * 37) % 120, r2 = r1 + 200 * a;
+        line(OX + Math.cos(t) * r1, OY + Math.sin(t) * r1, OX + Math.cos(t) * r2, OY + Math.sin(t) * r2, `rgba(230,240,255,${a})`, 2);
+      }
+    }
+
+    // HUD
+    const sec = SECTORS[state.sector];
+    text(`SECTOR ${state.sector + 1}/${SECTORS.length} · ${sec.name}`, 14, 22, '#e6e9ef', 14);
+    text(`ship x = ${fmt(absX(ship))}   y = ${fmt(absY(ship))}`, 14, 42, '#9aa3b2', 12);
+    text(`beacons ${state.got}/${BEACONS_PER}   hull ${'♥'.repeat(Math.max(0, ship.hull))}${'♡'.repeat(3 - Math.max(0, ship.hull))}   score ${state.score}   time ${state.time.toFixed(1)}s`, 14, 60, '#9aa3b2', 12);
+    text(`positions ${settings.f32 ? '32-bit' : '64-bit'} · rebasing ${settings.rebase ? 'on' : 'off'}`, W - 14, 22, settings.f32 && !settings.rebase ? '#ffb547' : '#6b7385', 12, 'right');
+    if (state.spooling) {
+      const bw = Math.min(300, W - 40), bx2 = (W - bw) / 2, by2 = H - 40;
+      ctx.fillStyle = '#1f2430'; ctx.fillRect(bx2, by2, bw, 10);
+      ctx.fillStyle = '#6cb8ff'; ctx.fillRect(bx2, by2, bw * clamp(state.charge, 0, 1), 10);
+      text(`JUMP DRIVE  charge ${state.charge.toFixed(1)}`, W / 2, by2 - 8, '#6cb8ff', 12, 'center');
+    }
+
+    if (!started) overlay('FAR LANDS', ['Collect 3 beacons in each sector · the jump drive then takes you farther from home',
+      'WASD or arrow keys to fly · avoid the asteroids', 'Press any key to start']);
+    else if (state.over === 'lost') overlay('HULL BREACHED', [`${state.total} beacons · score ${state.score} · reached ${fmt(SECTORS[state.sector].d, 0)} units from home`, 'Press R or click to try again']);
+    else if (state.over === 'won') overlay('FAR LANDS REACHED', [`${state.total} beacons · score ${state.score} · ${state.time.toFixed(1)} s`, '40,000,000 units from home', 'Press R or click to fly again']);
+    else if (paused) overlay('PAUSED', ['Press P to resume']);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,12,16,.72)'; ctx.fillRect(0, 0, W, H);
+    text(title, W / 2, H / 2 - 16, '#e6e9ef', 28, 'center');
+    lines.forEach((l, i) => text(l, W / 2, H / 2 + 14 + i * 20, '#9aa3b2', 13, 'center'));
+  }
+
+  // ---------- Lenses ----------
+  const LENSES = [
+    {
+      name: 'Bits & binary', chap: 'Chapter 1.2–1.4',
+      formula: 'value = (−1)^sign × 1.mantissa × 2^(exp − 127)\n32-bit: 1 sign + 8 exponent + 23 mantissa\n        = 24 significant binary digits\n64-bit: 1 + 11 + 52 = 53 significant digits',
+      used: ['Every position, speed and timer in a game', 'Choosing 32-bit vs 64-bit for a value',
+        'Packing colors and flags into bits', 'Saving and sending numbers over the network'],
+      tryThis: 'Watch the exponent go up by one each time x passes a power of two. The mantissa always has the same number of digits, so far from home fewer of them are left for the fraction.',
+      draw() {
+        const x = ship.x, p = floatParts(x, settings.f32);
+        const bx = 14, by = H - 70;
+        ctx.fillStyle = 'rgba(17,21,28,.9)'; ctx.fillRect(bx - 6, by - 20, Math.min(W - 16, settings.f32 ? 420 : 640), 60);
+        text(`stored x = ${x}`, bx, by - 4, '#e6e9ef', 12);
+        let cx = bx;
+        ctx.font = '12px Menlo, Consolas, monospace';
+        const cw = ctx.measureText('0').width;
+        const man = settings.f32 ? p.man : p.man.slice(0, 40) + '…';
+        text(p.sign, cx, by + 16, '#ff6b6b', 12); cx += cw * 2;
+        text(p.exp, cx, by + 16, '#ffb547', 12); cx += cw * (p.exp.length + 1);
+        text(man, cx, by + 16, '#6cb8ff', 12);
+        text(`sign · exponent ${p.ev} − ${p.bias} = ${p.e} · mantissa`, bx, by + 32, '#9aa3b2', 11);
+      },
+      live() {
+        const x = ship.x, p = floatParts(x, settings.f32), digits = settings.f32 ? 24 : 53;
+        const man = settings.f32 ? p.man : p.man.slice(0, 23) + '…';
+        return `stored ship x  ${x}\n${settings.rebase ? '(local: world x = origin + this)\n' : ''}scientific     ${sci(x)}\nbinary         ${p.lead}.${man}\n               × 2^${p.e}   (${digits} significant digits)\nsign ${p.sign}   exponent ${p.exp}\n         = ${p.ev} − ${p.bias} = ${p.e}`;
+      },
+    },
+    {
+      name: 'Gaps between floats', chap: 'Chapter 1.5',
+      formula: 'if 2^e ≤ |x| < 2^(e+1):\n  gap = 2^(e − 23)    32-bit\n  gap = 2^(e − 52)    64-bit\nthe gap doubles at every power of two',
+      used: ['Why far-away objects jitter in open worlds', 'Choosing world size and units (1 unit = 1 m?)',
+        'Deciding when to rebase the origin', 'Z-fighting: depth values running out of precision'],
+      tryThis: 'Untick "Origin rebasing" and reach The Drift (3,000,000): the tick marks of possible positions appear. At The Edge they are a whole unit apart and the ship moves in snaps; in the Far Lands a slow ship cannot move at all.',
+      controls: `<label><input type="checkbox" data-set="f32"> 32-bit positions (Math.fround on every store)</label>`,
+      draw() {
+        const gx = gapAt(ship.x, settings.f32), gy = gapAt(ship.y, settings.f32);
+        const x0 = sx(ship), y0 = sy(ship);
+        ctx.strokeStyle = 'rgba(255,181,71,.8)'; ctx.lineWidth = 1;
+        if (gx * S >= 3) {
+          const first = Math.ceil((ship.x - 40 / S * 12) / gx) * gx;
+          ctx.beginPath();
+          for (let v = first, i = 0; v <= ship.x + 40 / S * 12 && i < 400; v += gx, i++) {
+            const px = (v - cam.x) * S + OX; ctx.moveTo(px, y0 + 22); ctx.lineTo(px, y0 + 32);
+          }
+          ctx.stroke();
+          text(`possible x values, ${gx} apart`, x0, y0 + 46, '#ffb547', 12, 'center');
+        } else {
+          text(`gap at x = ${gapStr(gx)} units: too small to draw`, x0, y0 + 40, '#9aa3b2', 12, 'center');
+        }
+        if (gy * S >= 3) {
+          ctx.beginPath();
+          const first = Math.ceil((ship.y - 30 / S * 12) / gy) * gy;
+          for (let v = first, i = 0; v <= ship.y + 30 / S * 12 && i < 400; v += gy, i++) {
+            const py = (v - cam.y) * S + OY; ctx.moveTo(x0 + 22, py); ctx.lineTo(x0 + 32, py);
+          }
+          ctx.stroke();
+        }
+      },
+      live() {
+        const x = ship.x, g = gapAt(x, settings.f32), e = x === 0 ? 0 : exponentOf(Math.abs(x)), m = settings.f32 ? 23 : 52;
+        return `stored x      ${x}\n2^${e} ≤ |x| < 2^${e + 1}\ngap at x      2^(${e} − ${m}) = ${gapStr(g)} units\n              = ${gapStr(g * S)} px on screen\nnext float    ${x + g}\nstored y      ${ship.y}\ngap at y      ${gapStr(gapAt(ship.y, settings.f32))}\nstep / frame  |v|·Δt = ${state.lastStep.toFixed(3)} units\n${state.lastStep > 0 && state.lastStep < g / 2 ? 'STEP < gap/2: the move rounds away!' : ''}`;
+      },
+    },
+    {
+      name: 'Tolerance', chap: 'Chapter 1.6–1.7',
+      formula: '0.1 + 0.2 = 0.30000000000000004\nnever test   a == b\ninstead test |a − b| < ε    (ε = 1e−9)',
+      used: ['"Has the unit arrived?" checks', 'Timers and charge meters reaching full',
+        'Unit vectors whose dot product is 1.0000001', 'Physics contacts and "is it on the ground?"'],
+      tryThis: 'Untick "Compare with tolerance" and collect a sector\'s beacons. The charge adds 0.1 ten times, never equals 1 exactly, overshoots, and the drive misfires forever.',
+      controls: `<label><input type="checkbox" data-set="tolerance"> Compare with tolerance</label>`,
+      draw() {
+        if (!state.spooling) { text('collect all 3 beacons to spool the jump drive', W / 2, H - 22, '#9aa3b2', 12, 'center'); return; }
+        text(`charge = ${String(state.charge)}`, W / 2, H - 18, state.charge > 1 ? '#ff6b6b' : '#e6e9ef', 12, 'center');
+      },
+      live() {
+        const c = state.charge;
+        return `jump drive: +0.1 every ${TICK} s\n charge          ${String(c)}\n charge == 1     ${c === 1}\n |charge − 1|    ${Math.abs(c - 1).toExponential(1)}\n  < ε = 1e−9 ?   ${Math.abs(c - 1) < EPS}\n test used       ${settings.tolerance ? '|charge − 1| < ε' : 'charge == 1'}\n misfires        ${state.misfires}\n\n0.1 + 0.2 = ${String(0.1 + 0.2)}\nten × 0.1 = ${String(0.1 + 0.1 + 0.1 + 0.1 + 0.1 + 0.1 + 0.1 + 0.1 + 0.1 + 0.1)}`;
+      },
+    },
+    {
+      name: 'Accumulated error', chap: 'Chapter 1.8',
+      formula: 'each frame:  x ← round(x + v·Δt)\ndrift = stored − exact\n32-bit clock: t ← round32(t + Δt)',
+      used: ['Game clocks and long-running timers', 'Positions updated by small steps every frame',
+        'Physics that slowly gains or loses energy', 'Totals built from many small additions'],
+      tryThis: 'With rebasing off, fly slowly in The Edge: the hollow "exact" ship drifts away from the real one. With rebasing on, the drift stays near zero.',
+      draw() {
+        const x = (ref.x - origin.x - cam.x) * S + OX, y = (ref.y - origin.y - cam.y) * S + OY;
+        ctx.setLineDash([4, 4]); circle(x, y, SHIP_R * S + 3, null, '#b48cff', 1.5); ctx.setLineDash([]);
+        line(x, y, sx(ship), sy(ship), 'rgba(180,140,255,.8)', 1.5);
+        text('exact', x, y - SHIP_R * S - 8, '#b48cff', 12, 'center');
+      },
+      live() {
+        const ex = absX(ship) - ref.x, ey = absY(ship) - ref.y;
+        return `since entering this sector\n exact x (64-bit sum)  ${fmt(ref.x, 4)}\n stored world x        ${fmt(absX(ship), 4)}\n drift                 (${ex.toFixed(4)}, ${ey.toFixed(4)})\n\nmission clock, + Δt each frame\n 64-bit   ${state.clock64.toFixed(4)} s\n 32-bit   ${state.clock32.toFixed(4)} s\n off by   ${(state.clock32 - state.clock64).toFixed(4)} s`;
+      },
+    },
+    {
+      name: 'Origin rebasing', chap: 'Chapter 1.9',
+      formula: 'world = origin + local\nif |local| > 100:\n  shift = round(local)    (whole units)\n  origin ← origin + shift\n  local  ← local − shift   (every object)',
+      used: ['Open worlds and space games ("floating origin")', 'Flight sims over whole planets',
+        'Streaming levels in tiles or chunks', 'Endless runners that never stop running'],
+      tryThis: 'Untick "Origin rebasing" in The Edge (12,000,000): everything starts to shake. Tick it again and the shaking stops at once, though you are still 12 million units from home.',
+      controls: `<label><input type="checkbox" data-set="rebase"> Origin rebasing</label>`,
+      draw() {
+        const ox = (0 - cam.x) * S + OX, oy = (0 - cam.y) * S + OY;
+        if (ox > 0 && ox < W && oy > 0 && oy < H) {
+          line(ox - 10, oy, ox + 10, oy, '#ffb547', 2); line(ox, oy - 10, ox, oy + 10, '#ffb547', 2);
+          text('stored (0, 0)', ox + 8, oy - 8, '#ffb547', 12);
+        } else {
+          const a = Math.atan2(oy - OY, ox - OX);
+          const ex = OX + Math.cos(a) * Math.min(W, H) * 0.38, ey = OY + Math.sin(a) * Math.min(W, H) * 0.38;
+          text(`stored (0, 0) is ${f0(Math.hypot(ship.x, ship.y))} units this way →`, ex, ey, '#ffb547', 12, 'center');
+        }
+        if (settings.rebase) { ctx.setLineDash([5, 6]); circle(ox, oy, REBASE_DIST * S, null, 'rgba(255,181,71,.45)', 1.5); ctx.setLineDash([]); }
+      },
+      live() {
+        return `origin (whole numbers)  (${fmt(origin.x, 0)}, ${fmt(origin.y, 0)})\nship stored (local)     (${ship.x.toFixed(3)}, ${ship.y.toFixed(3)})\nship world = origin + local\n                        (${fmt(absX(ship), 3)}, ${fmt(absY(ship), 3)})\ngap at stored x         ${gapStr(gapAt(ship.x, settings.f32))}\ngap if stored as world  ${gapStr(gapAt(absX(ship), settings.f32))}\nrebases so far          ${state.rebases}`;
+      },
+    },
+  ];
+  for (const l of LENSES) l.on = false;
+
+  // ---------- Panel ----------
+  const lensesEl = document.getElementById('lenses');
+  const cardEl = document.getElementById('card');
+  let selected = null, liveEl = null;
+  LENSES.forEach((l, i) => {
+    const b = document.createElement('button');
+    b.className = 'lens';
+    b.innerHTML = `<kbd>${i + 1}</kbd>${l.name}`;
+    b.addEventListener('click', () => toggleLens(l));
+    l.btn = b; lensesEl.appendChild(b);
+  });
+  function toggleLens(l) {
+    if (!l) return;
+    if (l.on && selected === l) l.on = false; else l.on = true;
+    selected = l.on ? l : LENSES.find(x => x.on) || null;
+    for (const x of LENSES) { x.btn.classList.toggle('on', x.on); x.btn.classList.toggle('sel', x === selected); }
+    renderCard();
+  }
+  function renderCard() {
+    if (!selected) {
+      cardEl.innerHTML = `<h2>No lens on</h2><p style="margin:0;color:var(--muted)">Play a round first. Then press 1–5 to see how the game's numbers are stored, and what happens to them far from home.</p>`;
+      liveEl = null; return;
+    }
+    const l = selected;
+    cardEl.innerHTML = `
+      <h2>${l.name}</h2><span class="chap">${l.chap}</span>
+      <div class="formula">${l.formula}</div>
+      <h3>Where it's used in games</h3>
+      <ul>${l.used.map(u => `<li>${u}</li>`).join('')}</ul>
+      <h3>Try this</h3><div class="try">${l.tryThis}</div>
+      ${l.controls ? `<div class="controls">${l.controls}</div>` : ''}
+      <h3>Live numbers</h3><div class="live"></div>`;
+    liveEl = cardEl.querySelector('.live');
+    cardEl.querySelectorAll('[data-set]').forEach(el => {
+      const key = el.dataset.set;
+      const showEl = cardEl.querySelector(`[data-show="${key}"]`);
+      if (el.type === 'checkbox') el.checked = settings[key]; else el.value = settings[key];
+      if (showEl) showEl.textContent = settings[key];
+      el.addEventListener('input', () => {
+        settings[key] = el.type === 'checkbox' ? el.checked : parseFloat(el.value);
+        if (showEl) showEl.textContent = settings[key];
+        applySetting(key);
+      });
+    });
+    updateLive();
+  }
+  function updateLive() { if (liveEl && selected) liveEl.textContent = selected.live(); }
+  renderCard();
+
+  // ---------- Loop ----------
+  let last = performance.now(), liveTimer = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (started && !paused) update(dt);
+    render();
+    liveTimer -= dt;
+    if (liveTimer <= 0) { updateLive(); liveTimer = 0.1; }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
